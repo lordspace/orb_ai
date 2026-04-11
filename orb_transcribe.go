@@ -26,6 +26,8 @@ var AppVer = "0.1.0"
 var AppBuildDate = ""
 var AppGitCommit = ""
 
+const appEnvPrefix = "ORB_TRANSCRIBE"
+
 var supportedMediaExtensions = map[string]bool{
 	".aac":  true,
 	".aiff": true,
@@ -72,11 +74,11 @@ func newCliConfig() cliConfig {
 	config := cliConfig{
 		Provider: "local",
 		Backend: backendConfig{
-			Name: "cmd",
+			Name: "whispercpp",
 		},
 		Language:     "auto",
 		OutputFormat: "txt",
-		Model:        "medium",
+		Model:        "large-v3",
 		Workers:      workers,
 		Progress:     false,
 		Debug:        false,
@@ -227,7 +229,7 @@ func parseArgs(args []string) (cliConfig, error) {
 	langLong := flagSet.String("lang", "", "Language code")
 	formatShort := flagSet.String("F", config.OutputFormat, "Output format")
 	formatLong := flagSet.String("format", "", "Output format")
-	localBackendLong := flagSet.String("local-backend", "", "Local backend (cmd, whispercpp)")
+	localBackendLong := flagSet.String("local-backend", "", "Local backend (whispercpp, cmd)")
 	backendBinaryLong := flagSet.String("backend-binary", "", "Local backend binary override")
 	localCmdLong := flagSet.String("local-cmd", "", "Alias for --backend-binary")
 	ffmpegBinaryLong := flagSet.String("ffmpeg-binary", "", "Audio decode binary override")
@@ -324,40 +326,16 @@ func parseArgs(args []string) (cliConfig, error) {
 		inputDir = inputDirInfo.ResolvedFile
 	}
 
-	languageValue := firstString(*languageLong, *langLong, *languageShort)
-
-	if !hasExplicitOption(normalizedArgs, "-l", "--language", "--lang") {
-		languageValue = firstString(languageValue, envString("ORB_TRANSCRIBE_LANGUAGE"))
-	}
-
-	language := normalizeLanguage(languageValue)
-	outputFormatValue := firstString(*formatLong, *formatShort)
-
-	if !hasExplicitOption(normalizedArgs, "-F", "--format") {
-		outputFormatValue = firstString(outputFormatValue, envString("ORB_TRANSCRIBE_FORMAT"))
-	}
-
-	outputFormat := normalizeOutputFormat(outputFormatValue)
 	modelValue := firstString(*modelLong)
-
-	if !hasExplicitOption(normalizedArgs, "--model") {
-		modelValue = firstString(modelValue, envString("ORB_TRANSCRIBE_MODEL"))
-	}
-	systemPrompt, promptErr := resolveSystemPrompt(systemPromptRaw, systemPromptFileRaw)
-
-	if promptErr != nil {
-		return cliConfig{}, promptErr
-	}
 
 	openAiApiKey := firstString(*openAiApiKeyShort, *openAiApiKeyLong, *apiKeyLong)
 
 	if !hasExplicitOption(normalizedArgs, "-k", "--openai-api-key", "--api-key") {
 		openAiApiKey = firstString(
 			openAiApiKey,
-			envString(
+			getEnv(
 				"ORB_TRANSCRIBE_PROVIDER_OPENAI_API_KEY",
 				"ORB_TRANSCRIBE_OPENAI_API_KEY",
-				"OPENAI_API_KEY",
 			),
 		)
 	}
@@ -365,7 +343,7 @@ func parseArgs(args []string) (cliConfig, error) {
 	providerValue := firstString(*providerShort, *providerLong)
 
 	if !hasExplicitOption(normalizedArgs, "-p", "--provider") {
-		providerValue = firstString(providerValue, envString("ORB_TRANSCRIBE_PROVIDER"))
+		providerValue = firstString(providerValue, getEnv("ORB_TRANSCRIBE_PROVIDER"))
 	}
 
 	provider := resolveProvider(providerValue, openAiApiKey)
@@ -374,10 +352,19 @@ func parseArgs(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("unsupported provider: %s", providerValue)
 	}
 
+	providerEnvScope := ""
+
+	if provider != "" {
+		providerEnvScope = "PROVIDER_" + strings.ToUpper(provider)
+	}
+
 	localBackendValue := firstString(*localBackendLong)
 
 	if !hasExplicitOption(normalizedArgs, "--local-backend") {
-		localBackendValue = firstString(localBackendValue, envString("ORB_TRANSCRIBE_LOCAL_BACKEND"))
+		localBackendValue = firstString(
+			lookupEnv(providerEnvScope, "BACKEND", "ORB_TRANSCRIBE_LOCAL_BACKEND"),
+			localBackendValue,
+		)
 	}
 
 	localBackend := normalizeLocalBackend(localBackendValue)
@@ -390,13 +377,15 @@ func parseArgs(args []string) (cliConfig, error) {
 
 	if !hasExplicitOption(normalizedArgs, "--backend-binary", "--local-cmd") {
 		backendBinaryValue = firstString(
-			backendBinaryValue,
-			envString(
+			lookupEnv(
+				providerEnvScope,
+				"BINARY",
 				"ORB_TRANSCRIBE_PROVIDER_LOCAL_BINARY",
 				"ORB_TRANSCRIBE_LOCAL_BINARY",
 				"ORB_TRANSCRIBE_PROVIDER_LOCAL_CMD",
 				"ORB_TRANSCRIBE_LOCAL_CMD",
 			),
+			backendBinaryValue,
 		)
 	}
 
@@ -404,21 +393,75 @@ func parseArgs(args []string) (cliConfig, error) {
 
 	if !hasExplicitOption(normalizedArgs, "--ffmpeg-binary", "--ffmpeg-cmd") {
 		ffmpegBinaryValue = firstString(
+			lookupEnv(providerEnvScope, "FFMPEG_BINARY", "ORB_TRANSCRIBE_FFMPEG_BINARY", "ORB_TRANSCRIBE_FFMPEG_CMD"),
 			ffmpegBinaryValue,
-			envString("ORB_TRANSCRIBE_FFMPEG_BINARY", "ORB_TRANSCRIBE_FFMPEG_CMD"),
 		)
 	}
 
 	modelDir := firstString(*modelDirLong, *whisperModelDirLong)
 
 	if !hasExplicitOption(normalizedArgs, "--model-dir", "--whispercpp-model-dir") {
-		modelDir = firstString(modelDir, envString("ORB_TRANSCRIBE_MODEL_DIR", "ORB_TRANSCRIBE_WHISPERCPP_MODEL_DIR"))
+		modelDir = firstString(
+			lookupEnv(providerEnvScope, "MODEL_DIR", "ORB_TRANSCRIBE_MODEL_DIR", "ORB_TRANSCRIBE_WHISPERCPP_MODEL_DIR"),
+			modelDir,
+		)
 	}
 
 	modelFile := firstString(*modelFileLong, *whisperModelFileLong)
 
 	if !hasExplicitOption(normalizedArgs, "--model-file", "--whispercpp-model-file") {
-		modelFile = firstString(modelFile, envString("ORB_TRANSCRIBE_MODEL_FILE", "ORB_TRANSCRIBE_WHISPERCPP_MODEL_FILE"))
+		modelFile = firstString(
+			lookupEnv(providerEnvScope, "MODEL_FILE", "ORB_TRANSCRIBE_MODEL_FILE", "ORB_TRANSCRIBE_WHISPERCPP_MODEL_FILE"),
+			modelFile,
+		)
+	}
+
+	languageValue := firstString(*languageLong, *langLong, *languageShort)
+
+	if !hasExplicitOption(normalizedArgs, "-l", "--language", "--lang") {
+		languageValue = firstString(
+			lookupEnv(providerEnvScope, "LANGUAGE", "ORB_TRANSCRIBE_LANGUAGE"),
+			languageValue,
+		)
+	}
+
+	language := normalizeLanguage(languageValue)
+	outputFormatValue := firstString(*formatLong, *formatShort)
+
+	if !hasExplicitOption(normalizedArgs, "-F", "--format") {
+		outputFormatValue = firstString(
+			lookupEnv(providerEnvScope, "FORMAT", "ORB_TRANSCRIBE_FORMAT"),
+			outputFormatValue,
+		)
+	}
+
+	outputFormat := normalizeOutputFormat(outputFormatValue)
+
+	if !hasExplicitOption(normalizedArgs, "--model") {
+		modelValue = firstString(
+			lookupEnv(providerEnvScope, "MODEL", "ORB_TRANSCRIBE_MODEL"),
+			modelValue,
+		)
+	}
+
+	if !hasExplicitOption(normalizedArgs, "--system-prompt", "--prompt") {
+		systemPromptRaw = firstString(
+			lookupEnv(providerEnvScope, "SYSTEM_PROMPT", "ORB_TRANSCRIBE_SYSTEM_PROMPT"),
+			systemPromptRaw,
+		)
+	}
+
+	if !hasExplicitOption(normalizedArgs, "--system-prompt-file", "--prompt-file") {
+		systemPromptFileRaw = firstString(
+			lookupEnv(providerEnvScope, "SYSTEM_PROMPT_FILE", "ORB_TRANSCRIBE_SYSTEM_PROMPT_FILE"),
+			systemPromptFileRaw,
+		)
+	}
+
+	systemPrompt, promptErr := resolveSystemPrompt(systemPromptRaw, systemPromptFileRaw)
+
+	if promptErr != nil {
+		return cliConfig{}, promptErr
 	}
 
 	modelRequest := modelResolveRequest{
@@ -431,7 +474,7 @@ func parseArgs(args []string) (cliConfig, error) {
 	workers := *workersLong
 
 	if !hasExplicitOption(normalizedArgs, "--workers") {
-		envWorkers := envInt("ORB_TRANSCRIBE_WORKERS")
+		envWorkers := getEnvInt("ORB_TRANSCRIBE_WORKERS")
 
 		if envWorkers > 0 {
 			workers = envWorkers
@@ -444,13 +487,17 @@ func parseArgs(args []string) (cliConfig, error) {
 
 	progress := *progressLong
 
-	if !hasExplicitOption(normalizedArgs, "--progress") && envBool("ORB_TRANSCRIBE_PROGRESS") {
+	progressEnvValue := getEnv("ORB_TRANSCRIBE_PROGRESS")
+
+	if !hasExplicitOption(normalizedArgs, "--progress") && IsTrue(progressEnvValue) {
 		progress = true
 	}
 
 	debug := *debugLong
 
-	if !hasExplicitOption(normalizedArgs, "--debug") && envBool("ORB_TRANSCRIBE_DEBUG") {
+	debugEnvValue := getEnv("ORB_TRANSCRIBE_DEBUG")
+
+	if !hasExplicitOption(normalizedArgs, "--debug") && IsTrue(debugEnvValue) {
 		debug = true
 	}
 
@@ -548,10 +595,11 @@ func firstArg(values []string) string {
 	return values[0]
 }
 
-// envString returns the first non-empty environment variable value.
-func envString(names ...string) string {
+// getEnv returns the first non-empty environment variable value.
+func getEnv(names ...string) string {
 	for _, envName := range names {
-		envValue := strings.TrimSpace(os.Getenv(envName))
+		rawEnvValue := os.Getenv(envName)
+		envValue := strings.TrimSpace(rawEnvValue)
 
 		if envValue != "" {
 			return envValue
@@ -561,10 +609,10 @@ func envString(names ...string) string {
 	return ""
 }
 
-// envInt returns the first valid positive integer from the provided env vars.
-func envInt(names ...string) int {
+// getEnvInt returns the first valid positive integer from the provided env vars.
+func getEnvInt(names ...string) int {
 	for _, envName := range names {
-		envValue := strings.TrimSpace(os.Getenv(envName))
+		envValue := getEnv(envName)
 
 		if envValue == "" {
 			continue
@@ -580,19 +628,28 @@ func envInt(names ...string) int {
 	return 0
 }
 
-// envBool returns true when any provided env var contains a truthy value.
-func envBool(names ...string) bool {
-	for _, envName := range names {
-		envValue := strings.TrimSpace(os.Getenv(envName))
+// lookupEnv resolves one scoped app env name first, then generic fallback names.
+func lookupEnv(scope string, name string, fallbackNames ...string) string {
+	envNames := make([]string, 0, len(fallbackNames)+1)
 
-		if envValue == "" {
-			continue
+	if name != "" {
+		envName := appEnvPrefix
+
+		if scope != "" {
+			envName += "_" + scope
 		}
 
-		return isTrueString(envValue)
+		envName += "_" + name
+		envNames = append(envNames, envName)
 	}
 
-	return false
+	for _, envName := range fallbackNames {
+		envNames = append(envNames, envName)
+	}
+
+	envValue := getEnv(envNames...)
+
+	return envValue
 }
 
 // hasExplicitOption reports whether the user set any of the given flags directly.
@@ -867,10 +924,10 @@ func normalizeLocalBackend(value string) string {
 	normalizedValue := normalizeDashedValue(value)
 
 	switch normalizedValue {
-	case "", "cmd", "shell":
-		return "cmd"
-	case "whispercpp", "whisper-cpp", "whisper.cpp":
+	case "", "whispercpp", "whisper-cpp", "whisper.cpp", "whisper-cli":
 		return "whispercpp"
+	case "cmd", "shell":
+		return "cmd"
 	default:
 		return ""
 	}
@@ -935,7 +992,7 @@ func resolveModel(request modelResolveRequest) string {
 			return modelFromFile
 		}
 
-		return "medium"
+		return "large-v3"
 	case "tiny":
 		return "tiny"
 	case "base":
@@ -955,7 +1012,7 @@ func resolveModel(request modelResolveRequest) string {
 			return modelFromFile
 		}
 
-		return "medium"
+		return "large-v3"
 	}
 }
 
@@ -968,16 +1025,26 @@ func mapApiResponseFormat(value string) string {
 	return value
 }
 
-// isTrueString normalizes common truthy strings used in env fallbacks.
-func isTrueString(value string) bool {
-	normalizedValue := normalizeLowerValue(value)
-
-	switch normalizedValue {
-	case "1", "true", "yes", "on":
-		return true
-	default:
+// IsTrue checks if a string represents a truthy value (1, true, yes, y).
+func IsTrue(value string) bool {
+	if value == "" {
 		return false
 	}
+
+	if value == "1" || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes") || strings.EqualFold(value, "y") {
+		return true
+	}
+
+	return false
+}
+
+// IsFalse checks if a string represents a falsy value (empty, 0, false, no, n).
+func IsFalse(value string) bool {
+	if value == "" || value == "0" || strings.EqualFold(value, "false") || strings.EqualFold(value, "n") || strings.EqualFold(value, "no") {
+		return true
+	}
+
+	return false
 }
 
 // newWhisperOutputRef resolves the generated whisper-cli output file from the requested result file.
@@ -1109,12 +1176,23 @@ func whisperModelFromFile(modelFile string) string {
 	}
 }
 
+// resolveBin resolves one binary name through PATH and returns "" when missing.
+func resolveBin(binName string) string {
+	resolvedFile, lookErr := exec.LookPath(binName)
+
+	if lookErr != nil {
+		return ""
+	}
+
+	return resolvedFile
+}
+
 // resolveBinary finds one executable from an explicit override or fallback names.
 func resolveBinary(config binaryConfig) (string, error) {
 	if config.Value != "" {
-		resolvedFile, lookErr := exec.LookPath(config.Value)
+		resolvedFile := resolveBin(config.Value)
 
-		if lookErr != nil {
+		if resolvedFile == "" {
 			return "", fmt.Errorf("%s not found: %s", config.Label, config.Value)
 		}
 
@@ -1126,9 +1204,9 @@ func resolveBinary(config binaryConfig) (string, error) {
 			continue
 		}
 
-		resolvedFile, lookErr := exec.LookPath(fileName)
+		resolvedFile := resolveBin(fileName)
 
-		if lookErr == nil {
+		if resolvedFile != "" {
 			return resolvedFile, nil
 		}
 	}

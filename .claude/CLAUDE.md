@@ -31,8 +31,9 @@ This file provides guidance to Claude Code when working with code in this reposi
 8. **SIMPLEST FIX** - Always aim for the simplest solution, don't over-engineer
 9. **BLANK LINES around `if` blocks and between logical sections** - ALWAYS add a blank line before and after every `if` block, after early returns, between setup/action/result sections, and between logical code blocks. Code without blank lines between blocks is UNREADABLE. Each logical block must breathe. Exception: if a comment describes the block directly below it, keep them together
 10. **Calculate into variables** - NEVER pass function calls or transformations inline as arguments. Always store computed values in a named variable first, then use the variable. This applies everywhere: struct fields, function arguments, and return values
-11. **NEVER use deprecated APIs** - Find the correct modern alternative
-12. **NO closures** - Never use anonymous functions that capture outer variables. Use named types and methods instead
+11. **Return variables, not inline calls** - NEVER return a function call or transformation inline. Store the result in a named variable first, then return the variable
+12. **NEVER use deprecated APIs** - Find the correct modern alternative
+13. **NO closures** - Never use anonymous functions that capture outer variables. Use named types and methods instead
 
 **Variable Naming Convention:**
 - Use Go convention: `Id` not `ID` in camelCase

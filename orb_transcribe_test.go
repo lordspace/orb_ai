@@ -78,16 +78,78 @@ func TestResolveProvider(t *testing.T) {
 	}
 }
 
+// TestLookupEnv prefers the scoped app env over generic fallback names.
+func TestLookupEnv(t *testing.T) {
+	t.Setenv("ORB_TRANSCRIBE_MODEL", "small")
+	t.Setenv("ORB_TRANSCRIBE_PROVIDER_LOCAL_MODEL", "large-v3")
+
+	actualValue := lookupEnv("PROVIDER_LOCAL", "MODEL", "ORB_TRANSCRIBE_MODEL")
+
+	if actualValue != "large-v3" {
+		t.Fatalf("lookupEnv() = %q, want %q", actualValue, "large-v3")
+	}
+}
+
+// TestIsTrue matches the shared truthy rules copied from ozip.
+func TestIsTrue(t *testing.T) {
+	trueValues := []string{"1", "true", "TRUE", "yes", "YES", "y", "Y"}
+
+	for _, value := range trueValues {
+		if !IsTrue(value) {
+			t.Fatalf("IsTrue(%q) = false", value)
+		}
+	}
+}
+
+// TestIsFalse matches the shared falsy rules copied from ozip.
+func TestIsFalse(t *testing.T) {
+	falseValues := []string{"", "0", "false", "FALSE", "no", "NO", "n", "N"}
+
+	for _, value := range falseValues {
+		if !IsFalse(value) {
+			t.Fatalf("IsFalse(%q) = false", value)
+		}
+	}
+}
+
+// TestReadCliConfigIgnoresUnprefixedOpenAiEnv keeps env loading on app-prefixed keys.
+func TestReadCliConfigIgnoresUnprefixedOpenAiEnv(t *testing.T) {
+	tempDir := t.TempDir()
+	inputFile := filepath.Join(tempDir, "test.mp3")
+	writeErr := os.WriteFile(inputFile, []byte("test"), 0600)
+
+	if writeErr != nil {
+		t.Fatalf("os.WriteFile() error = %v", writeErr)
+	}
+
+	t.Setenv("OPENAI_API_KEY", "bad-key")
+
+	config, configErr := parseArgs([]string{"--file", inputFile})
+
+	if configErr != nil {
+		t.Fatalf("parseArgs() error = %v", configErr)
+	}
+
+	if config.Provider != "local" {
+		t.Fatalf("readCliConfig().Provider = %q", config.Provider)
+	}
+
+	if config.OpenAiApiKey != "" {
+		t.Fatalf("readCliConfig().OpenAiApiKey = %q", config.OpenAiApiKey)
+	}
+}
+
 // TestNormalizeLocalBackend covers the supported local backend aliases.
 func TestNormalizeLocalBackend(t *testing.T) {
 	testCases := map[string]string{
-		"":            "cmd",
+		"":            "whispercpp",
 		"cmd":         "cmd",
 		"shell":       "cmd",
 		"whispercpp":  "whispercpp",
 		"whisper-cpp": "whispercpp",
 		"whisper_cpp": "whispercpp",
 		"whisper.cpp": "whispercpp",
+		"whisper-cli": "whispercpp",
 		"something":   "",
 	}
 
@@ -150,9 +212,9 @@ func TestResolveModel(t *testing.T) {
 		ModelFile     string
 		ExpectedValue string
 	}{
-		{"local", "", "", "medium"},
-		{"local", "medium", "", "medium"},
-		{"local", "AAAAA", "", "medium"},
+		{"local", "", "", "large-v3"},
+		{"local", "medium", "", "large-v3"},
+		{"local", "AAAAA", "", "large-v3"},
 		{"local", "large_v3", "", "large-v3"},
 		{"local", "large-v3", "", "large-v3"},
 		{"local", "", "/tmp/ggml-large-v3.bin", "large-v3"},
@@ -267,11 +329,11 @@ func TestNewCliConfig(t *testing.T) {
 		t.Fatalf("newCliConfig().Provider = %q", config.Provider)
 	}
 
-	if config.Backend.Name != "cmd" {
+	if config.Backend.Name != "whispercpp" {
 		t.Fatalf("newCliConfig().Backend.Name = %q", config.Backend.Name)
 	}
 
-	if config.Model != "medium" {
+	if config.Model != "large-v3" {
 		t.Fatalf("newCliConfig().Model = %q", config.Model)
 	}
 
