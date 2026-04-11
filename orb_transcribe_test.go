@@ -34,7 +34,7 @@ func TestNormalizeCliArgs(t *testing.T) {
 // TestNormalizeProvider covers the supported provider aliases.
 func TestNormalizeProvider(t *testing.T) {
 	testCases := map[string]string{
-		"":               "local",
+		"":               "",
 		"local":          "local",
 		"whisper":        "local",
 		"faster-whisper": "local",
@@ -51,6 +51,51 @@ func TestNormalizeProvider(t *testing.T) {
 
 		if actualValue != expectedValue {
 			t.Fatalf("normalizeProvider(%q) = %q, want %q", inputValue, actualValue, expectedValue)
+		}
+	}
+}
+
+// TestResolveProvider applies the default provider rule around API keys.
+func TestResolveProvider(t *testing.T) {
+	testCases := []struct {
+		ProviderValue string
+		ApiKey        string
+		ExpectedValue string
+	}{
+		{"", "", "local"},
+		{"", "test-key", "openai"},
+		{"local", "test-key", "local"},
+		{"openai", "", "openai"},
+		{"bad-provider", "", ""},
+	}
+
+	for _, testCase := range testCases {
+		actualValue := resolveProvider(testCase.ProviderValue, testCase.ApiKey)
+
+		if actualValue != testCase.ExpectedValue {
+			t.Fatalf("resolveProvider(%q, %q) = %q, want %q", testCase.ProviderValue, testCase.ApiKey, actualValue, testCase.ExpectedValue)
+		}
+	}
+}
+
+// TestNormalizeLocalBackend covers the supported local backend aliases.
+func TestNormalizeLocalBackend(t *testing.T) {
+	testCases := map[string]string{
+		"":            "cmd",
+		"cmd":         "cmd",
+		"shell":       "cmd",
+		"whispercpp":  "whispercpp",
+		"whisper-cpp": "whispercpp",
+		"whisper_cpp": "whispercpp",
+		"whisper.cpp": "whispercpp",
+		"something":   "",
+	}
+
+	for inputValue, expectedValue := range testCases {
+		actualValue := normalizeLocalBackend(inputValue)
+
+		if actualValue != expectedValue {
+			t.Fatalf("normalizeLocalBackend(%q) = %q, want %q", inputValue, actualValue, expectedValue)
 		}
 	}
 }
@@ -93,6 +138,32 @@ func TestNormalizeOutputFormat(t *testing.T) {
 
 		if actualValue != expectedValue {
 			t.Fatalf("normalizeOutputFormat(%q) = %q, want %q", inputValue, actualValue, expectedValue)
+		}
+	}
+}
+
+// TestResolveModel keeps unknown values on provider defaults.
+func TestResolveModel(t *testing.T) {
+	testCases := []struct {
+		Provider      string
+		ModelValue    string
+		ExpectedValue string
+	}{
+		{"local", "", "medium"},
+		{"local", "medium", "medium"},
+		{"local", "AAAAA", "medium"},
+		{"local", "large_v3", "large-v3"},
+		{"local", "large-v3", "large-v3"},
+		{"openai", "", "whisper-1"},
+		{"openai", "whisper1", "whisper-1"},
+		{"openai", "AAAAA", "whisper-1"},
+	}
+
+	for _, testCase := range testCases {
+		actualValue := resolveModel(testCase.Provider, testCase.ModelValue)
+
+		if actualValue != testCase.ExpectedValue {
+			t.Fatalf("resolveModel(%q, %q) = %q, want %q", testCase.Provider, testCase.ModelValue, actualValue, testCase.ExpectedValue)
 		}
 	}
 }
@@ -150,5 +221,61 @@ func TestResolveSystemPromptFile(t *testing.T) {
 
 	if promptValue != "extra context" {
 		t.Fatalf("resolveSystemPrompt() = %q, want %q", promptValue, "extra context")
+	}
+}
+
+// TestResolveInputRef guesses one media file when the extension was omitted.
+func TestResolveInputRef(t *testing.T) {
+	tmpDir := t.TempDir()
+	inputFile := filepath.Join(tmpDir, "clip.mp3")
+	writeErr := os.WriteFile(inputFile, []byte("test"), 0644)
+
+	if writeErr != nil {
+		t.Fatalf("os.WriteFile() error = %v", writeErr)
+	}
+
+	inputInfo, resolveErr := resolveInputRef(newInputRefRequest(filepath.Join(tmpDir, "clip"), "file"))
+
+	if resolveErr != nil {
+		t.Fatalf("resolveInputRef() error = %v", resolveErr)
+	}
+
+	expectedFile, expectedErr := filepath.EvalSymlinks(inputFile)
+
+	if expectedErr != nil {
+		t.Fatalf("filepath.EvalSymlinks() error = %v", expectedErr)
+	}
+
+	if inputInfo.ResolvedFile != expectedFile {
+		t.Fatalf("resolveInputRef() = %q, want %q", inputInfo.ResolvedFile, expectedFile)
+	}
+}
+
+// TestNewCliConfig keeps the default config values explicit.
+func TestNewCliConfig(t *testing.T) {
+	config := newCliConfig()
+
+	if config.Provider != "local" {
+		t.Fatalf("newCliConfig().Provider = %q", config.Provider)
+	}
+
+	if config.Backend.Name != "cmd" {
+		t.Fatalf("newCliConfig().Backend.Name = %q", config.Backend.Name)
+	}
+
+	if config.Model != "medium" {
+		t.Fatalf("newCliConfig().Model = %q", config.Model)
+	}
+
+	if config.Backend.Cmd != "" {
+		t.Fatalf("newCliConfig().Backend.Cmd = %q", config.Backend.Cmd)
+	}
+
+	if config.Backend.FfmpegCmd != "" {
+		t.Fatalf("newCliConfig().Backend.FfmpegCmd = %q", config.Backend.FfmpegCmd)
+	}
+
+	if config.Workers < 1 {
+		t.Fatalf("newCliConfig().Workers = %d", config.Workers)
 	}
 }
