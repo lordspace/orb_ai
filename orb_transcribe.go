@@ -51,10 +51,7 @@ var supportedMediaExtensions = map[string]bool{
 
 // cliConfig keeps the full app configuration in one place.
 type cliConfig struct {
-	InputFile    string
-	InputDir     string
-	OutputFile   string
-	TargetDir    string
+	Files        fileRefs
 	Provider     string
 	Language     string
 	OutputFormat string
@@ -74,11 +71,18 @@ type resultRec struct {
 	Data   map[string]any `json:"data"`
 }
 
-// transcribeJob represents one file to transcribe.
-type transcribeJob struct {
-	Index      int
+// fileRefs groups reusable input and output file and directory fields.
+type fileRefs struct {
 	InputFile  string
+	InputDir   string
 	OutputFile string
+	OutputDir  string
+}
+
+// jobInput represents one file-processing job.
+type jobInput struct {
+	Index int
+	Files fileRefs
 }
 
 // workerResult carries one finished job result back to the coordinator.
@@ -91,7 +95,7 @@ type workerResult struct {
 // app owns the config, job list, and shared progress behavior.
 type app struct {
 	config     cliConfig
-	jobs       []transcribeJob
+	jobs       []jobInput
 	progressMu sync.Mutex
 }
 
@@ -100,24 +104,68 @@ type dirCollector struct {
 	files []string
 }
 
-// main runs the app and prints the final JSON result.
-func main() {
-	resultRecord, exitCode := runMain(os.Args[1:])
-	writeResult(resultRecord)
-	os.Exit(exitCode)
+// outputTargetRequest carries output target inputs for resolution.
+type outputTargetRequest struct {
+	Files fileRefs
 }
 
-// runMain builds the config, runs the app, and returns the final result record.
-func runMain(args []string) (resultRec, int) {
+// inputRefRequest describes one required input file or directory.
+type inputRefRequest struct {
+	ItemType     string
+	RawValue     string
+	Name         string
+	AbsoluteFile string
+	ResolvedFile string
+}
+
+// newCliConfig builds a config with sane baseline defaults.
+func newCliConfig() cliConfig {
+	workers := runtime.NumCPU()
+
+	if workers < 1 {
+		workers = 1
+	}
+
+	return cliConfig{
+		Provider:     "local",
+		Language:     "auto",
+		OutputFormat: "txt",
+		Model:        "medium",
+		LocalCmd:     "qs_transcribe",
+		Workers:      workers,
+		Progress:     false,
+		Debug:        false,
+	}
+}
+
+// newInputRefRequest builds an explicit file or directory input request.
+func newInputRefRequest(value string, itemType string) inputRefRequest {
+	request := inputRefRequest{
+		ItemType: strings.TrimSpace(itemType),
+		RawValue: strings.TrimSpace(value),
+	}
+
+	if request.ItemType == "" {
+		request.ItemType = "file"
+	}
+
+	request.Name = filepath.Base(request.RawValue)
+
+	return request
+}
+
+// main runs the app and prints the final JSON result.
+func main() {
 	resultRecord := newBaseResult()
 	exitCode := 0
 
-	config, parseErr := parseArgs(args)
+	config, parseErr := parseArgs(os.Args[1:])
 
 	if parseErr != nil {
 		resultRecord.Msg = "error: " + parseErr.Error()
 
-		return resultRecord, 255
+		writeResult(resultRecord)
+		os.Exit(255)
 	}
 
 	resultRecord.Data["provider"] = config.Provider
@@ -131,13 +179,12 @@ func runMain(args []string) (resultRec, int) {
 	if processErr != nil {
 		resultRecord.Msg = "error: " + processErr.Error()
 		exitCode = 255
-
-		return resultRecord, exitCode
+	} else {
+		resultRecord.Status = true
 	}
 
-	resultRecord.Status = true
-
-	return resultRecord, exitCode
+	writeResult(resultRecord)
+	os.Exit(exitCode)
 }
 
 // newBaseResult prepares the static metadata for every response.
@@ -159,9 +206,13 @@ func writeResult(resultRecord resultRec) {
 	jsonBuffer, marshalErr := json.MarshalIndent(resultRecord, "", "    ")
 
 	if marshalErr != nil {
-		fmt.Println(`{"status":false,"msg":"error: failed to encode JSON result","data":{}}`)
+		fallbackResult := resultRec{
+			Status: false,
+			Msg:    "error: failed to encode JSON result",
+			Data:   map[string]any{},
+		}
 
-		return
+		jsonBuffer, _ = json.MarshalIndent(fallbackResult, "", "    ")
 	}
 
 	fmt.Println(string(jsonBuffer))
@@ -169,6 +220,7 @@ func writeResult(resultRecord resultRec) {
 
 // parseArgs reads flags, env fallbacks, and prompt file content into one config.
 func parseArgs(args []string) (cliConfig, error) {
+	config := newCliConfig()
 	normalizedArgs := normalizeCliArgs(args)
 	flagSet := flag.NewFlagSet(AppName, flag.ContinueOnError)
 	flagSet.SetOutput(os.Stderr)
@@ -186,17 +238,17 @@ func parseArgs(args []string) (cliConfig, error) {
 	openAiApiKeyShort := flagSet.String("k", "", "OpenAI API key")
 	openAiApiKeyLong := flagSet.String("openai-api-key", "", "OpenAI API key")
 	apiKeyLong := flagSet.String("api-key", "", "OpenAI API key")
-	languageShort := flagSet.String("l", "auto", "Language code")
+	languageShort := flagSet.String("l", config.Language, "Language code")
 	languageLong := flagSet.String("language", "", "Language code")
 	langLong := flagSet.String("lang", "", "Language code")
-	formatShort := flagSet.String("F", "txt", "Output format")
+	formatShort := flagSet.String("F", config.OutputFormat, "Output format")
 	formatLong := flagSet.String("format", "", "Output format")
 	modelLong := flagSet.String("model", "", "Model name")
 	systemPromptLong := flagSet.String("system-prompt", "", "Prompt context for models that support it")
 	promptLong := flagSet.String("prompt", "", "Prompt context for models that support it")
 	systemPromptFileLong := flagSet.String("system-prompt-file", "", "Read prompt context from file")
 	promptFileLong := flagSet.String("prompt-file", "", "Read prompt context from file")
-	workersLong := flagSet.Int("workers", 0, "Parallel worker count")
+	workersLong := flagSet.Int("workers", config.Workers, "Parallel worker count")
 	progressLong := flagSet.Bool("progress", false, "Show progress on stderr")
 	debugLong := flagSet.Bool("debug", false, "Include debug fields")
 
@@ -239,7 +291,15 @@ func parseArgs(args []string) (cliConfig, error) {
 	systemPromptRaw := firstString(*systemPromptLong, *promptLong)
 	systemPromptFileRaw := firstString(*systemPromptFileLong, *promptFileLong)
 
-	outputFile, targetDir, outputErr := normalizeOutputTargets(outputFileRaw, targetDirRaw, inputDirRaw != "")
+	outputTargetRequest := outputTargetRequest{
+		Files: fileRefs{
+			InputDir:   inputDirRaw,
+			OutputFile: outputFileRaw,
+			OutputDir:  targetDirRaw,
+		},
+	}
+
+	resolvedPaths, outputErr := normalizeOutputTargets(outputTargetRequest)
 
 	if outputErr != nil {
 		return cliConfig{}, outputErr
@@ -248,25 +308,27 @@ func parseArgs(args []string) (cliConfig, error) {
 	inputFile := ""
 
 	if inputFileRaw != "" {
-		inputFileResolved, resolveErr := resolveInputPath(inputFileRaw, false)
+		inputFileRequest := newInputRefRequest(inputFileRaw, "file")
+		inputFileInfo, resolveErr := resolveInputRef(inputFileRequest)
 
 		if resolveErr != nil {
 			return cliConfig{}, resolveErr
 		}
 
-		inputFile = inputFileResolved
+		inputFile = inputFileInfo.ResolvedFile
 	}
 
 	inputDir := ""
 
 	if inputDirRaw != "" {
-		inputDirResolved, resolveErr := resolveInputPath(inputDirRaw, true)
+		inputDirRequest := newInputRefRequest(inputDirRaw, "dir")
+		inputDirInfo, resolveErr := resolveInputRef(inputDirRequest)
 
 		if resolveErr != nil {
 			return cliConfig{}, resolveErr
 		}
 
-		inputDir = inputDirResolved
+		inputDir = inputDirInfo.ResolvedFile
 	}
 
 	providerValue := firstString(*providerShort, *providerLong)
@@ -324,7 +386,7 @@ func parseArgs(args []string) (cliConfig, error) {
 	localCmd := envString("ORB_TRANSCRIBE_PROVIDER_LOCAL_CMD", "ORB_TRANSCRIBE_LOCAL_CMD")
 
 	if localCmd == "" {
-		localCmd = "qs_transcribe"
+		localCmd = config.LocalCmd
 	}
 
 	workers := *workersLong
@@ -338,11 +400,7 @@ func parseArgs(args []string) (cliConfig, error) {
 	}
 
 	if workers < 1 {
-		workers = runtime.NumCPU()
-	}
-
-	if workers < 1 {
-		workers = 1
+		workers = config.Workers
 	}
 
 	progress := *progressLong
@@ -365,22 +423,24 @@ func parseArgs(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("local provider currently supports txt output only")
 	}
 
-	return cliConfig{
-		InputFile:    inputFile,
-		InputDir:     inputDir,
-		OutputFile:   outputFile,
-		TargetDir:    targetDir,
-		Provider:     provider,
-		Language:     language,
-		OutputFormat: outputFormat,
-		Model:        model,
-		SystemPrompt: systemPrompt,
-		OpenAiApiKey: openAiApiKey,
-		LocalCmd:     localCmd,
-		Workers:      workers,
-		Progress:     progress,
-		Debug:        debug,
-	}, nil
+	config.Files = fileRefs{
+		InputFile:  inputFile,
+		InputDir:   inputDir,
+		OutputFile: resolvedPaths.OutputFile,
+		OutputDir:  resolvedPaths.OutputDir,
+	}
+	config.Provider = provider
+	config.Language = language
+	config.OutputFormat = outputFormat
+	config.Model = model
+	config.SystemPrompt = systemPrompt
+	config.OpenAiApiKey = openAiApiKey
+	config.LocalCmd = localCmd
+	config.Workers = workers
+	config.Progress = progress
+	config.Debug = debug
+
+	return config, nil
 }
 
 // normalizeCliArgs accepts ozip-style underscore aliases for long flags.
@@ -496,14 +556,24 @@ func hasExplicitOption(args []string, optionNames ...string) bool {
 }
 
 // looksLikeDir uses a cheap stat check to detect directory positional inputs.
-func looksLikeDir(path string) bool {
-	absolutePath, absErr := filepath.Abs(path)
+func looksLikeDir(inputRef string) bool {
+	inputBase := filepath.Base(strings.TrimSpace(inputRef))
+
+	if len(inputBase) > 0 && inputBase[0] == '.' {
+		return false
+	}
+
+	if filepath.Ext(inputBase) != "" {
+		return false
+	}
+
+	absoluteInput, absErr := filepath.Abs(inputRef)
 
 	if absErr != nil {
 		return false
 	}
 
-	fileInfo, statErr := os.Stat(absolutePath)
+	fileInfo, statErr := os.Stat(absoluteInput)
 
 	if statErr != nil {
 		return false
@@ -512,100 +582,104 @@ func looksLikeDir(path string) bool {
 	return fileInfo.IsDir()
 }
 
-// resolveInputPath resolves symlinks and validates a required input path.
-func resolveInputPath(path string, expectDir bool) (string, error) {
-	absolutePath, absErr := filepath.Abs(path)
+// resolveInputRef resolves symlinks and validates a required input file or directory.
+func resolveInputRef(request inputRefRequest) (inputRefRequest, error) {
+	result := request
+	absoluteInput, absErr := filepath.Abs(request.RawValue)
 
 	if absErr != nil {
-		return "", fmt.Errorf("cannot resolve path: %s", path)
+		return inputRefRequest{}, fmt.Errorf("cannot resolve %s: %s", request.ItemType, request.RawValue)
 	}
 
-	resolvedPath, resolveErr := filepath.EvalSymlinks(absolutePath)
-
-	if resolveErr != nil {
-		return "", fmt.Errorf("cannot resolve path: %s", absolutePath)
-	}
-
-	fileInfo, statErr := os.Stat(resolvedPath)
+	result.AbsoluteFile = absoluteInput
+	fileInfo, statErr := os.Stat(absoluteInput)
 
 	if statErr != nil {
-		return "", fmt.Errorf("path not found: %s", resolvedPath)
+		return inputRefRequest{}, fmt.Errorf("%s not found: %s", request.ItemType, absoluteInput)
 	}
 
-	if expectDir && !fileInfo.IsDir() {
-		return "", fmt.Errorf("directory not found: %s", resolvedPath)
+	if request.ItemType == "dir" && !fileInfo.IsDir() {
+		return inputRefRequest{}, fmt.Errorf("directory not found: %s", absoluteInput)
 	}
 
-	if !expectDir && fileInfo.IsDir() {
-		return "", fmt.Errorf("file not found: %s", resolvedPath)
+	if request.ItemType == "file" && fileInfo.IsDir() {
+		return inputRefRequest{}, fmt.Errorf("file not found: %s", absoluteInput)
 	}
 
-	return resolvedPath, nil
+	resolvedInput, resolveErr := filepath.EvalSymlinks(absoluteInput)
+
+	if resolveErr != nil {
+		return inputRefRequest{}, fmt.Errorf("cannot resolve %s: %s", request.ItemType, absoluteInput)
+	}
+
+	result.ResolvedFile = resolvedInput
+
+	return result, nil
 }
 
-// resolveOptionalPath returns an absolute path and resolves symlinks when it exists.
-func resolveOptionalPath(path string) (string, error) {
-	absolutePath, absErr := filepath.Abs(path)
+// resolveOptionalRef returns an absolute file or directory and resolves symlinks when it exists.
+func resolveOptionalRef(inputRef string) (string, error) {
+	absoluteInput, absErr := filepath.Abs(inputRef)
 
 	if absErr != nil {
-		return "", fmt.Errorf("cannot resolve path: %s", path)
+		return "", fmt.Errorf("cannot resolve file or directory: %s", inputRef)
 	}
 
-	_, statErr := os.Stat(absolutePath)
+	_, statErr := os.Stat(absoluteInput)
 
 	if statErr != nil {
-		return absolutePath, nil
+		return absoluteInput, nil
 	}
 
-	resolvedPath, resolveErr := filepath.EvalSymlinks(absolutePath)
+	resolvedInput, resolveErr := filepath.EvalSymlinks(absoluteInput)
 
 	if resolveErr != nil {
-		return absolutePath, nil
+		return absoluteInput, nil
 	}
 
-	return resolvedPath, nil
+	return resolvedInput, nil
 }
 
 // normalizeOutputTargets interprets existing directories as target-dir style outputs.
-func normalizeOutputTargets(outputFileRaw string, targetDirRaw string, dirMode bool) (string, string, error) {
-	outputFile := ""
-	targetDir := targetDirRaw
+func normalizeOutputTargets(request outputTargetRequest) (fileRefs, error) {
+	result := request.Files
 
-	if outputFileRaw != "" {
-		outputPath, outputErr := resolveOptionalPath(outputFileRaw)
+	if result.OutputFile != "" {
+		outputRef, outputErr := resolveOptionalRef(result.OutputFile)
 
 		if outputErr != nil {
-			return "", "", outputErr
+			return fileRefs{}, outputErr
 		}
 
-		fileInfo, statErr := os.Stat(outputPath)
+		fileInfo, statErr := os.Stat(outputRef)
 
 		if statErr == nil && fileInfo.IsDir() {
-			if targetDir != "" {
-				return "", "", fmt.Errorf("output directory passed twice: %s", outputPath)
+			if result.OutputDir != "" {
+				return fileRefs{}, fmt.Errorf("output directory passed twice: %s", outputRef)
 			}
 
-			targetDir = outputPath
+			result.OutputDir = outputRef
+			result.OutputFile = ""
 		} else {
-			outputFile = outputPath
+			result.OutputFile = outputRef
 		}
 	}
 
-	if dirMode && outputFile != "" {
-		return "", "", fmt.Errorf("option -o/--output-file cannot be used with --dir; use --target-dir")
+	if request.Files.InputDir != "" && result.OutputFile != "" {
+		return fileRefs{}, fmt.Errorf("option -o/--output-file cannot be used with --dir; use --target-dir")
 	}
 
-	if targetDir != "" {
-		targetDirPath, targetDirErr := resolveOptionalPath(targetDir)
+	if result.OutputDir != "" {
+		outputDirRef, outputDirErr := resolveOptionalRef(result.OutputDir)
 
-		if targetDirErr != nil {
-			return "", "", targetDirErr
+		if outputDirErr != nil {
+			return fileRefs{}, outputDirErr
 		}
 
-		targetDir = targetDirPath
+		result.OutputDir = outputDirRef
 	}
 
-	return outputFile, targetDir, nil
+	return result, nil
 }
 
 // resolveSystemPrompt reads prompt text from flags or a prompt file.
@@ -622,16 +696,17 @@ func resolveSystemPrompt(promptText string, promptFile string) (string, error) {
 		return "", nil
 	}
 
-	promptFilePath, resolveErr := resolveInputPath(promptFile, false)
+	promptFileRequest := newInputRefRequest(promptFile, "file")
+	promptFileInfo, resolveErr := resolveInputRef(promptFileRequest)
 
 	if resolveErr != nil {
 		return "", resolveErr
 	}
 
-	promptBytes, readErr := os.ReadFile(promptFilePath)
+	promptBytes, readErr := os.ReadFile(promptFileInfo.ResolvedFile)
 
 	if readErr != nil {
-		return "", fmt.Errorf("failed to read prompt file: %s", promptFilePath)
+		return "", fmt.Errorf("failed to read prompt file: %s", promptFileInfo.ResolvedFile)
 	}
 
 	return strings.TrimSpace(string(promptBytes)), nil
@@ -754,86 +829,95 @@ func (a *app) prepare() error {
 		return nil
 	}
 
-	localCmdPath, lookErr := exec.LookPath(a.config.LocalCmd)
+	localCmdFile, lookErr := exec.LookPath(a.config.LocalCmd)
 
 	if lookErr != nil {
-		return fmt.Errorf("local transcribe binary not found in PATH: %s", a.config.LocalCmd)
+		return fmt.Errorf("local transcribe binary not found: %s", a.config.LocalCmd)
 	}
 
-	a.config.LocalCmd = localCmdPath
+	a.config.LocalCmd = localCmdFile
 
 	return nil
 }
 
 // collectJobs builds a unified job list for both single-file and directory mode.
 func (a *app) collectJobs() error {
-	if a.config.InputFile != "" {
-		outputFile := a.config.OutputFile
-
-		if outputFile == "" {
-			outputFile = a.buildOutputFile(a.config.InputFile)
-		}
-
-		a.jobs = []transcribeJob{
-			{
-				Index:      0,
-				InputFile:  a.config.InputFile,
-				OutputFile: outputFile,
-			},
-		}
+	if a.config.Files.InputFile != "" {
+		a.jobs = []jobInput{a.newJobInput(0, a.config.Files.InputFile)}
 
 		return nil
 	}
 
 	collector := &dirCollector{}
-	walkErr := filepath.WalkDir(a.config.InputDir, collector.walk)
+	walkErr := filepath.WalkDir(a.config.Files.InputDir, collector.walk)
 
 	if walkErr != nil {
 		return walkErr
 	}
 
 	if len(collector.files) == 0 {
-		return fmt.Errorf("no media files found in directory: %s", a.config.InputDir)
+		return fmt.Errorf("no media files found in directory: %s", a.config.Files.InputDir)
 	}
 
 	sort.Strings(collector.files)
-	a.jobs = make([]transcribeJob, 0, len(collector.files))
+	a.jobs = make([]jobInput, 0, len(collector.files))
 
 	for fileIndex, inputFile := range collector.files {
-		job := transcribeJob{
-			Index:      fileIndex,
-			InputFile:  inputFile,
-			OutputFile: a.buildOutputFile(inputFile),
-		}
-
-		a.jobs = append(a.jobs, job)
+		a.jobs = append(a.jobs, a.newJobInput(fileIndex, inputFile))
 	}
 
 	return nil
 }
 
+// newJobInput builds one job with the computed output file.
+func (a *app) newJobInput(index int, inputFile string) jobInput {
+	outputFile := a.config.Files.OutputFile
+
+	if outputFile == "" || a.config.Files.InputDir != "" {
+		outputFile = a.buildOutputFile(inputFile)
+	}
+
+	return jobInput{
+		Index: index,
+		Files: fileRefs{
+			InputFile:  inputFile,
+			OutputFile: outputFile,
+		},
+	}
+}
+
 // walk handles one filesystem entry during directory scanning.
-func (c *dirCollector) walk(path string, dirEntry os.DirEntry, walkErr error) error {
+func (c *dirCollector) walk(inputFile string, dirEntry os.DirEntry, walkErr error) error {
 	if walkErr != nil {
 		return walkErr
+	}
+
+	entryName := dirEntry.Name()
+
+	if len(entryName) > 0 && entryName[0] == '.' {
+		if dirEntry.IsDir() {
+			return filepath.SkipDir
+		}
+
+		return nil
 	}
 
 	if dirEntry.IsDir() {
 		return nil
 	}
 
-	if !isSupportedMediaFile(path) {
+	if !isSupportedMediaFile(inputFile) {
 		return nil
 	}
 
-	c.files = append(c.files, path)
+	c.files = append(c.files, inputFile)
 
 	return nil
 }
 
 // isSupportedMediaFile uses a cheap extension filter during directory scans.
-func isSupportedMediaFile(path string) bool {
-	fileExt := strings.ToLower(filepath.Ext(path))
+func isSupportedMediaFile(inputFile string) bool {
+	fileExt := strings.ToLower(filepath.Ext(inputFile))
 
 	if fileExt == "" {
 		return false
@@ -842,15 +926,15 @@ func isSupportedMediaFile(path string) bool {
 	return supportedMediaExtensions[fileExt]
 }
 
-// buildOutputFile calculates the output transcript path for one input file.
+// buildOutputFile calculates the output transcript file for one input file.
 func (a *app) buildOutputFile(inputFile string) string {
 	fileBase := strings.TrimSuffix(filepath.Base(inputFile), filepath.Ext(inputFile))
 	outputBase := fileBase + "_transcript." + a.config.OutputFormat
 	outputDir := filepath.Dir(inputFile)
 
-	if a.config.TargetDir != "" {
-		outputDir = a.config.TargetDir
-		relativeDir := buildRelativeDir(a.config.InputDir, inputFile)
+	if a.config.Files.OutputDir != "" {
+		outputDir = a.config.Files.OutputDir
+		relativeDir := a.buildRelativeDir(inputFile)
 
 		if relativeDir != "" {
 			outputDir = filepath.Join(outputDir, relativeDir)
@@ -861,13 +945,13 @@ func (a *app) buildOutputFile(inputFile string) string {
 }
 
 // buildRelativeDir preserves directory layout under --target-dir.
-func buildRelativeDir(rootDir string, inputFile string) string {
-	if rootDir == "" {
+func (a *app) buildRelativeDir(inputFile string) string {
+	if a.config.Files.InputDir == "" {
 		return ""
 	}
 
 	inputDir := filepath.Dir(inputFile)
-	relativeDir, relativeErr := filepath.Rel(rootDir, inputDir)
+	relativeDir, relativeErr := filepath.Rel(a.config.Files.InputDir, inputDir)
 
 	if relativeErr != nil || relativeDir == "." {
 		return ""
@@ -895,7 +979,7 @@ func (a *app) processJobsSequential() ([]map[string]any, error) {
 		results[job.Index] = jobResult
 
 		if a.config.Progress {
-			a.printProgress(jobIndex+1, len(a.jobs), filepath.Base(job.InputFile))
+			a.printProgress(jobIndex+1, len(a.jobs), filepath.Base(job.Files.InputFile))
 		}
 
 		if jobErr != nil {
@@ -913,7 +997,7 @@ func (a *app) processJobsSequential() ([]map[string]any, error) {
 // processJobsParallel processes jobs with a small worker pool and ordered results.
 func (a *app) processJobsParallel() ([]map[string]any, error) {
 	results := make([]map[string]any, len(a.jobs))
-	inputChannel := make(chan transcribeJob)
+	inputChannel := make(chan jobInput)
 	resultChannel := make(chan workerResult)
 	waitGroup := &sync.WaitGroup{}
 	workerCount := a.config.Workers
@@ -955,7 +1039,7 @@ func (a *app) processJobsParallel() ([]map[string]any, error) {
 }
 
 // runWorker processes jobs from the input channel until it is closed.
-func (a *app) runWorker(inputChannel <-chan transcribeJob, resultChannel chan<- workerResult, waitGroup *sync.WaitGroup) {
+func (a *app) runWorker(inputChannel <-chan jobInput, resultChannel chan<- workerResult, waitGroup *sync.WaitGroup) {
 	defer waitGroup.Done()
 
 	for job := range inputChannel {
@@ -969,7 +1053,7 @@ func (a *app) runWorker(inputChannel <-chan transcribeJob, resultChannel chan<- 
 }
 
 // feedJobs sends all jobs to the worker pool and then closes the input channel.
-func feedJobs(jobs []transcribeJob, inputChannel chan<- transcribeJob) {
+func feedJobs(jobs []jobInput, inputChannel chan<- jobInput) {
 	for _, job := range jobs {
 		inputChannel <- job
 	}
@@ -984,8 +1068,8 @@ func closeResults(waitGroup *sync.WaitGroup, resultChannel chan workerResult) {
 }
 
 // processJob creates the output directory and runs the selected provider.
-func (a *app) processJob(job transcribeJob) (map[string]any, error) {
-	outputDir := filepath.Dir(job.OutputFile)
+func (a *app) processJob(job jobInput) (map[string]any, error) {
+	outputDir := filepath.Dir(job.Files.OutputFile)
 	mkdirErr := os.MkdirAll(outputDir, 0755)
 
 	if mkdirErr != nil {
@@ -1014,11 +1098,11 @@ func (a *app) processJob(job transcribeJob) (map[string]any, error) {
 }
 
 // transcribeWithOpenAi sends one audio file to OpenAI and writes the response.
-func (a *app) transcribeWithOpenAi(job transcribeJob) (map[string]any, error) {
-	fileHandle, openErr := os.Open(job.InputFile)
+func (a *app) transcribeWithOpenAi(job jobInput) (map[string]any, error) {
+	fileHandle, openErr := os.Open(job.Files.InputFile)
 
 	if openErr != nil {
-		return nil, fmt.Errorf("failed to open file: %s", job.InputFile)
+		return nil, fmt.Errorf("failed to open file: %s", job.Files.InputFile)
 	}
 
 	defer fileHandle.Close()
@@ -1057,10 +1141,10 @@ func (a *app) transcribeWithOpenAi(job transcribeJob) (map[string]any, error) {
 		return nil, fmt.Errorf("openai request failed: %w", requestErr)
 	}
 
-	writeErr := os.WriteFile(job.OutputFile, responseBody, 0644)
+	writeErr := os.WriteFile(job.Files.OutputFile, responseBody, 0644)
 
 	if writeErr != nil {
-		return nil, fmt.Errorf("failed to write transcript output: %s", job.OutputFile)
+		return nil, fmt.Errorf("failed to write transcript output: %s", job.Files.OutputFile)
 	}
 
 	transcriptText := strings.TrimSpace(string(responseBody))
@@ -1075,12 +1159,12 @@ func (a *app) transcribeWithOpenAi(job transcribeJob) (map[string]any, error) {
 }
 
 // transcribeWithLocal shells out to the local qs_transcribe-compatible binary.
-func (a *app) transcribeWithLocal(job transcribeJob) (map[string]any, error) {
+func (a *app) transcribeWithLocal(job jobInput) (map[string]any, error) {
 	localCmdArgs := []string{
-		"--file", job.InputFile,
+		"--file", job.Files.InputFile,
 		"--lang", a.config.Language,
 		"--model", a.config.Model,
-		"--output-file", job.OutputFile,
+		"--output-file", job.Files.OutputFile,
 	}
 
 	command := exec.Command(a.config.LocalCmd, localCmdArgs...)
@@ -1108,10 +1192,10 @@ func (a *app) transcribeWithLocal(job transcribeJob) (map[string]any, error) {
 		}
 	}
 
-	transcriptBytes, readErr := os.ReadFile(job.OutputFile)
+	transcriptBytes, readErr := os.ReadFile(job.Files.OutputFile)
 
 	if readErr != nil {
-		return nil, fmt.Errorf("failed to read transcript output: %s", job.OutputFile)
+		return nil, fmt.Errorf("failed to read transcript output: %s", job.Files.OutputFile)
 	}
 
 	transcriptText := strings.TrimSpace(string(transcriptBytes))
@@ -1135,10 +1219,10 @@ func (a *app) shouldStreamLocalProgress() bool {
 }
 
 // newSuccessResult builds the per-file JSON result on success.
-func (a *app) newSuccessResult(job transcribeJob, transcriptText string, outputSize int) map[string]any {
+func (a *app) newSuccessResult(job jobInput, transcriptText string, outputSize int) map[string]any {
 	resultData := map[string]any{
-		"file":          job.InputFile,
-		"output_file":   job.OutputFile,
+		"file":          job.Files.InputFile,
+		"output_file":   job.Files.OutputFile,
 		"provider":      a.config.Provider,
 		"language":      a.config.Language,
 		"output_format": a.config.OutputFormat,
@@ -1157,10 +1241,10 @@ func (a *app) newSuccessResult(job transcribeJob, transcriptText string, outputS
 }
 
 // newErrorResult builds the per-file JSON result on failure.
-func (a *app) newErrorResult(job transcribeJob, jobErr error) map[string]any {
+func (a *app) newErrorResult(job jobInput, jobErr error) map[string]any {
 	resultData := map[string]any{
-		"file":          job.InputFile,
-		"output_file":   job.OutputFile,
+		"file":          job.Files.InputFile,
+		"output_file":   job.Files.OutputFile,
 		"provider":      a.config.Provider,
 		"language":      a.config.Language,
 		"output_format": a.config.OutputFormat,
@@ -1197,8 +1281,8 @@ func (a *app) buildResultData(results []map[string]any) map[string]any {
 	}
 
 	return map[string]any{
-		"source_dir": a.config.InputDir,
-		"target_dir": a.config.TargetDir,
+		"source_dir": a.config.Files.InputDir,
+		"target_dir": a.config.Files.OutputDir,
 		"provider":   a.config.Provider,
 		"results":    results,
 		"total":      len(results),

@@ -116,8 +116,10 @@ func TestMapApiResponseFormat(t *testing.T) {
 func TestBuildOutputFile(t *testing.T) {
 	application := app{
 		config: cliConfig{
-			InputDir:     "/tmp/source",
-			TargetDir:    "/tmp/out",
+			Files: fileRefs{
+				InputDir:  "/tmp/source",
+				OutputDir: "/tmp/out",
+			},
 			OutputFormat: "txt",
 		},
 	}
