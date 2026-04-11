@@ -88,8 +88,8 @@ type backendConfig struct {
 	ModelFile string
 }
 
-// binaryRef describes one executable override plus its smart fallback names.
-type binaryRef struct {
+// binaryConfig describes one executable override plus its smart fallback names.
+type binaryConfig struct {
 	Label string
 	Value string
 	Names []string
@@ -1049,18 +1049,18 @@ func isTrueString(value string) bool {
 }
 
 // resolveBinary finds one executable from an explicit override or fallback names.
-func resolveBinary(request binaryRef) (string, error) {
-	if request.Value != "" {
-		resolvedFile, lookErr := exec.LookPath(request.Value)
+func resolveBinary(config binaryConfig) (string, error) {
+	if config.Value != "" {
+		resolvedFile, lookErr := exec.LookPath(config.Value)
 
 		if lookErr != nil {
-			return "", fmt.Errorf("%s not found: %s", request.Label, request.Value)
+			return "", fmt.Errorf("%s not found: %s", config.Label, config.Value)
 		}
 
 		return resolvedFile, nil
 	}
 
-	for _, fileName := range request.Names {
+	for _, fileName := range config.Names {
 		if fileName == "" {
 			continue
 		}
@@ -1072,7 +1072,7 @@ func resolveBinary(request binaryRef) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("%s not found", request.Label)
+	return "", fmt.Errorf("%s not found", config.Label)
 }
 
 // mergeMaps copies all extraData fields into baseData.
@@ -1463,12 +1463,12 @@ func (p localProvider) transcribe(a *app, job jobInput) (map[string]any, error) 
 
 // prepare resolves the local transcription binary before work starts.
 func (p localCmdBackend) prepare(a *app) error {
-	localCmdRequest := binaryRef{
+	localCmdConfig := binaryConfig{
 		Label: "local transcribe binary",
 		Value: a.config.Backend.Cmd,
 		Names: []string{"qs_transcribe"},
 	}
-	localCmdFile, lookErr := resolveBinary(localCmdRequest)
+	localCmdFile, lookErr := resolveBinary(localCmdConfig)
 
 	if lookErr != nil {
 		return lookErr
@@ -1538,12 +1538,12 @@ func (p localCmdBackend) transcribe(a *app, job jobInput) (map[string]any, error
 
 // prepare validates the future whisper.cpp backend configuration.
 func (p localWhisperCppBackend) prepare(a *app) error {
-	ffmpegRequest := binaryRef{
+	ffmpegConfig := binaryConfig{
 		Label: "ffmpeg binary",
 		Value: a.config.Backend.FfmpegCmd,
 		Names: []string{"ffmpeg"},
 	}
-	ffmpegFile, lookErr := resolveBinary(ffmpegRequest)
+	ffmpegFile, lookErr := resolveBinary(ffmpegConfig)
 
 	if lookErr != nil {
 		return lookErr
