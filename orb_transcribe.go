@@ -49,67 +49,8 @@ var supportedMediaExtensions = map[string]bool{
 	".wma":  true,
 }
 
-// cliConfig keeps the full app configuration in one place.
-type cliConfig struct {
-	Files        fileRefs
-	Provider     string
-	Backend      backendConfig
-	Language     string
-	OutputFormat string
-	Model        string
-	SystemPrompt string
-	OpenAiApiKey string
-	Workers      int
-	Progress     bool
-	Debug        bool
-}
-
-// resultRec is the top-level JSON response shape printed by the app.
-type resultRec struct {
-	Status bool           `json:"status"`
-	Msg    string         `json:"msg"`
-	Data   map[string]any `json:"data"`
-}
-
-// fileRefs groups reusable input and output file and directory fields.
-type fileRefs struct {
-	InputFile  string
-	InputDir   string
-	OutputFile string
-	OutputDir  string
-}
-
-// backendConfig keeps local backend-specific settings together.
-type backendConfig struct {
-	Name      string
-	Cmd       string
-	FfmpegCmd string
-	ModelDir  string
-	ModelFile string
-}
-
-// binaryConfig describes one executable override plus its smart fallback names.
-type binaryConfig struct {
-	Label string
-	Value string
-	Names []string
-}
-
-// jobInput represents one file-processing job.
-type jobInput struct {
-	Index int
-	Files fileRefs
-}
-
-// workerResult carries one finished job result back to the coordinator.
-type workerResult struct {
-	Index int
-	Data  map[string]any
-	Err   error
-}
-
-// transcribeProvider defines one transcription backend.
-type transcribeProvider interface {
+// provider defines one transcription backend.
+type provider interface {
 	prepare(a *app) error
 	transcribe(a *app, job jobInput) (map[string]any, error)
 }
@@ -120,47 +61,6 @@ type localBackend interface {
 	transcribe(a *app, job jobInput) (map[string]any, error)
 }
 
-// app owns the config, job list, and shared progress behavior.
-type app struct {
-	config     cliConfig
-	jobs       []jobInput
-	provider   transcribeProvider
-	progressMu sync.Mutex
-}
-
-// dirCollector walks a directory and collects candidate media files.
-type dirCollector struct {
-	files []string
-}
-
-// outputTargetRequest carries output target inputs for resolution.
-type outputTargetRequest struct {
-	Files fileRefs
-}
-
-// inputRefRequest describes one required input file or directory.
-type inputRefRequest struct {
-	ItemType     string
-	RawValue     string
-	Name         string
-	AbsoluteFile string
-	ResolvedFile string
-}
-
-// openAiProvider sends audio files to the OpenAI transcription API.
-type openAiProvider struct{}
-
-// localProvider routes local transcription to the selected local backend.
-type localProvider struct {
-	backend localBackend
-}
-
-// localCmdBackend shells out to the local transcription binary.
-type localCmdBackend struct{}
-
-// localWhisperCppBackend is the future in-process Whisper backend.
-type localWhisperCppBackend struct{}
-
 // newCliConfig builds a config with sane baseline defaults.
 func newCliConfig() cliConfig {
 	workers := runtime.NumCPU()
@@ -169,7 +69,7 @@ func newCliConfig() cliConfig {
 		workers = 1
 	}
 
-	return cliConfig{
+	config := cliConfig{
 		Provider: "local",
 		Backend: backendConfig{
 			Name: "cmd",
@@ -181,6 +81,8 @@ func newCliConfig() cliConfig {
 		Progress:     false,
 		Debug:        false,
 	}
+
+	return config
 }
 
 // newInputRefRequest builds an explicit file or directory input request.
@@ -268,7 +170,7 @@ func main() {
 
 // newBaseResult prepares the static metadata for every response.
 func newBaseResult() resultRec {
-	return resultRec{
+	resultRecord := resultRec{
 		Status: false,
 		Msg:    "",
 		Data: map[string]any{
@@ -278,6 +180,8 @@ func newBaseResult() resultRec {
 			"app_git_commit": AppGitCommit,
 		},
 	}
+
+	return resultRecord
 }
 
 // writeResult prints the final JSON response to stdout.
@@ -324,8 +228,10 @@ func parseArgs(args []string) (cliConfig, error) {
 	formatShort := flagSet.String("F", config.OutputFormat, "Output format")
 	formatLong := flagSet.String("format", "", "Output format")
 	localBackendLong := flagSet.String("local-backend", "", "Local backend (cmd, whispercpp)")
-	localCmdLong := flagSet.String("local-cmd", "", "Local command backend binary override")
-	ffmpegCmdLong := flagSet.String("ffmpeg-cmd", "", "Audio decode binary override")
+	backendBinaryLong := flagSet.String("backend-binary", "", "Local backend binary override")
+	localCmdLong := flagSet.String("local-cmd", "", "Alias for --backend-binary")
+	ffmpegBinaryLong := flagSet.String("ffmpeg-binary", "", "Audio decode binary override")
+	ffmpegCmdLong := flagSet.String("ffmpeg-cmd", "", "Alias for --ffmpeg-binary")
 	modelDirLong := flagSet.String("model-dir", "", "Local model directory")
 	modelFileLong := flagSet.String("model-file", "", "Local model file")
 	whisperModelDirLong := flagSet.String("whispercpp-model-dir", "", "Alias for --model-dir")
@@ -468,8 +374,6 @@ func parseArgs(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("unsupported provider: %s", providerValue)
 	}
 
-	model := resolveModel(provider, modelValue)
-
 	localBackendValue := firstString(*localBackendLong)
 
 	if !hasExplicitOption(normalizedArgs, "--local-backend") {
@@ -482,16 +386,27 @@ func parseArgs(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("unsupported local backend: %s", localBackendValue)
 	}
 
-	backendCmd := firstString(*localCmdLong)
+	backendBinaryValue := firstString(*backendBinaryLong, *localCmdLong)
 
-	if !hasExplicitOption(normalizedArgs, "--local-cmd") {
-		backendCmd = firstString(backendCmd, envString("ORB_TRANSCRIBE_PROVIDER_LOCAL_CMD", "ORB_TRANSCRIBE_LOCAL_CMD"))
+	if !hasExplicitOption(normalizedArgs, "--backend-binary", "--local-cmd") {
+		backendBinaryValue = firstString(
+			backendBinaryValue,
+			envString(
+				"ORB_TRANSCRIBE_PROVIDER_LOCAL_BINARY",
+				"ORB_TRANSCRIBE_LOCAL_BINARY",
+				"ORB_TRANSCRIBE_PROVIDER_LOCAL_CMD",
+				"ORB_TRANSCRIBE_LOCAL_CMD",
+			),
+		)
 	}
 
-	ffmpegCmd := firstString(*ffmpegCmdLong)
+	ffmpegBinaryValue := firstString(*ffmpegBinaryLong, *ffmpegCmdLong)
 
-	if !hasExplicitOption(normalizedArgs, "--ffmpeg-cmd") {
-		ffmpegCmd = firstString(ffmpegCmd, envString("ORB_TRANSCRIBE_FFMPEG_CMD"))
+	if !hasExplicitOption(normalizedArgs, "--ffmpeg-binary", "--ffmpeg-cmd") {
+		ffmpegBinaryValue = firstString(
+			ffmpegBinaryValue,
+			envString("ORB_TRANSCRIBE_FFMPEG_BINARY", "ORB_TRANSCRIBE_FFMPEG_CMD"),
+		)
 	}
 
 	modelDir := firstString(*modelDirLong, *whisperModelDirLong)
@@ -505,6 +420,13 @@ func parseArgs(args []string) (cliConfig, error) {
 	if !hasExplicitOption(normalizedArgs, "--model-file", "--whispercpp-model-file") {
 		modelFile = firstString(modelFile, envString("ORB_TRANSCRIBE_MODEL_FILE", "ORB_TRANSCRIBE_WHISPERCPP_MODEL_FILE"))
 	}
+
+	modelRequest := modelResolveRequest{
+		Provider:  provider,
+		Value:     modelValue,
+		ModelFile: modelFile,
+	}
+	model := resolveModel(modelRequest)
 
 	workers := *workersLong
 
@@ -540,8 +462,8 @@ func parseArgs(args []string) (cliConfig, error) {
 	}
 	config.Provider = provider
 	config.Backend.Name = localBackend
-	config.Backend.Cmd = backendCmd
-	config.Backend.FfmpegCmd = ffmpegCmd
+	config.Backend.Binary = backendBinaryValue
+	config.Backend.DecodeBinary = ffmpegBinaryValue
 	config.Backend.ModelDir = modelDir
 	config.Backend.ModelFile = modelFile
 	config.Language = language
@@ -989,10 +911,10 @@ func normalizeOutputFormat(value string) string {
 }
 
 // resolveModel normalizes known model aliases and falls back to sane defaults.
-func resolveModel(provider string, value string) string {
-	modelValue := normalizeDashedValue(value)
+func resolveModel(request modelResolveRequest) string {
+	modelValue := normalizeDashedValue(request.Value)
 
-	if provider == "openai" {
+	if request.Provider == "openai" {
 		switch modelValue {
 		case "", "default", "whisper1", "whisper-1":
 			return "whisper-1"
@@ -1005,8 +927,14 @@ func resolveModel(provider string, value string) string {
 		}
 	}
 
+	modelFromFile := whisperModelFromFile(request.ModelFile)
+
 	switch modelValue {
 	case "", "default", "medium":
+		if modelFromFile != "" {
+			return modelFromFile
+		}
+
 		return "medium"
 	case "tiny":
 		return "tiny"
@@ -1023,6 +951,10 @@ func resolveModel(provider string, value string) string {
 	case "turbo":
 		return "turbo"
 	default:
+		if modelFromFile != "" {
+			return modelFromFile
+		}
+
 		return "medium"
 	}
 }
@@ -1045,6 +977,135 @@ func isTrueString(value string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// newWhisperOutputRef resolves the generated whisper-cli output file from the requested result file.
+func newWhisperOutputRef(resultFile string) whisperOutputRef {
+	outputRef := whisperOutputRef{ResultFile: resultFile}
+	fileExt := filepath.Ext(resultFile)
+
+	if fileExt == ".txt" {
+		outputRef.BaseFile = strings.TrimSuffix(resultFile, fileExt)
+		outputRef.GeneratedFile = resultFile
+
+		return outputRef
+	}
+
+	outputRef.BaseFile = resultFile
+	outputRef.GeneratedFile = resultFile + ".txt"
+
+	return outputRef
+}
+
+// resolveWhisperModelFile picks one local whisper.cpp model file from explicit or default locations.
+func (a *app) resolveWhisperModelFile() (string, error) {
+	if a.config.Backend.ModelFile != "" {
+		modelRequest := newInputRefRequest(a.config.Backend.ModelFile, "file")
+		modelInfo, resolveErr := resolveInputRef(modelRequest)
+
+		if resolveErr != nil {
+			return "", resolveErr
+		}
+
+		return modelInfo.ResolvedFile, nil
+	}
+
+	modelFileName := whisperModelFileName(a.config.Model)
+
+	if modelFileName == "" {
+		return "", fmt.Errorf("unsupported local model: %s", a.config.Model)
+	}
+
+	if a.config.Backend.ModelDir != "" {
+		modelDirRequest := newInputRefRequest(a.config.Backend.ModelDir, "dir")
+		modelDirInfo, resolveErr := resolveInputRef(modelDirRequest)
+
+		if resolveErr != nil {
+			return "", resolveErr
+		}
+
+		modelFile := filepath.Join(modelDirInfo.ResolvedFile, modelFileName)
+		modelInfo, resolveErr := resolveInputRef(newInputRefRequest(modelFile, "file"))
+
+		if resolveErr != nil {
+			return "", resolveErr
+		}
+
+		return modelInfo.ResolvedFile, nil
+	}
+
+	workingDir, workingErr := os.Getwd()
+
+	if workingErr == nil {
+		modelFile := filepath.Join(workingDir, "models", modelFileName)
+		modelInfo, resolveErr := resolveInputRef(newInputRefRequest(modelFile, "file"))
+
+		if resolveErr == nil {
+			return modelInfo.ResolvedFile, nil
+		}
+	}
+
+	executableFile, executableErr := os.Executable()
+
+	if executableErr == nil {
+		modelsDir := filepath.Join(filepath.Dir(executableFile), "models")
+		modelFile := filepath.Join(modelsDir, modelFileName)
+		modelInfo, resolveErr := resolveInputRef(newInputRefRequest(modelFile, "file"))
+
+		if resolveErr == nil {
+			return modelInfo.ResolvedFile, nil
+		}
+	}
+
+	return "", fmt.Errorf("local model file not found: set --model-file or --model-dir")
+}
+
+// whisperModelFileName maps the local model alias to one whisper.cpp model file name.
+func whisperModelFileName(model string) string {
+	switch model {
+	case "tiny":
+		return "ggml-tiny.bin"
+	case "base":
+		return "ggml-base.bin"
+	case "small":
+		return "ggml-small.bin"
+	case "medium":
+		return "ggml-medium.bin"
+	case "large":
+		return "ggml-large-v3.bin"
+	case "large-v2":
+		return "ggml-large-v2.bin"
+	case "large-v3":
+		return "ggml-large-v3.bin"
+	case "turbo":
+		return "ggml-large-v3-turbo.bin"
+	default:
+		return ""
+	}
+}
+
+// whisperModelFromFile extracts the local model alias from one whisper.cpp model file name.
+func whisperModelFromFile(modelFile string) string {
+	modelBase := filepath.Base(modelFile)
+
+	switch modelBase {
+	case "ggml-tiny.bin", "ggml-tiny.en.bin":
+		return "tiny"
+	case "ggml-base.bin", "ggml-base.en.bin":
+		return "base"
+	case "ggml-small.bin", "ggml-small.en.bin":
+		return "small"
+	case "ggml-medium.bin", "ggml-medium.en.bin":
+		return "medium"
+	case "ggml-large-v2.bin":
+		return "large-v2"
+	case "ggml-large-v3.bin":
+		return "large-v3"
+	case "ggml-large-v3-turbo.bin":
+		return "turbo"
+	default:
+		return ""
 	}
 }
 
@@ -1152,13 +1213,15 @@ func (a *app) newJobInput(index int, inputFile string) jobInput {
 		outputFile = a.buildOutputFile(inputFile)
 	}
 
-	return jobInput{
+	job := jobInput{
 		Index: index,
 		Files: fileRefs{
 			InputFile:  inputFile,
 			OutputFile: outputFile,
 		},
 	}
+
+	return job
 }
 
 // walk handles one filesystem entry during directory scanning.
@@ -1465,7 +1528,7 @@ func (p localProvider) transcribe(a *app, job jobInput) (map[string]any, error) 
 func (p localCmdBackend) prepare(a *app) error {
 	localCmdConfig := binaryConfig{
 		Label: "local transcribe binary",
-		Value: a.config.Backend.Cmd,
+		Value: a.config.Backend.Binary,
 		Names: []string{"qs_transcribe"},
 	}
 	localCmdFile, lookErr := resolveBinary(localCmdConfig)
@@ -1474,21 +1537,23 @@ func (p localCmdBackend) prepare(a *app) error {
 		return lookErr
 	}
 
-	a.config.Backend.Cmd = localCmdFile
+	a.config.Backend.Binary = localCmdFile
 
 	return nil
 }
 
 // transcribe shells out to the local qs_transcribe-compatible binary.
 func (p localCmdBackend) transcribe(a *app, job jobInput) (map[string]any, error) {
-	localCmdArgs := []string{
-		"--file", job.Files.InputFile,
-		"--lang", a.config.Language,
-		"--model", a.config.Model,
-		"--output-file", job.Files.OutputFile,
+	commandParams := cmdParams{
+		Binary: a.config.Backend.Binary,
+		Args: []string{
+			"--file", job.Files.InputFile,
+			"--lang", a.config.Language,
+			"--model", a.config.Model,
+			"--output-file", job.Files.OutputFile,
+		},
 	}
-
-	command := exec.Command(a.config.Backend.Cmd, localCmdArgs...)
+	command := exec.Command(commandParams.Binary, commandParams.Args...)
 
 	if a.shouldStreamLocalProgress() {
 		command.Stdout = io.Discard
@@ -1525,8 +1590,8 @@ func (p localCmdBackend) transcribe(a *app, job jobInput) (map[string]any, error
 	resultData := a.newSuccessResult(job, transcriptText, len(transcriptBytes))
 
 	if a.config.Debug {
-		resultData["local_cmd"] = a.config.Backend.Cmd
-		resultData["local_cmd_args"] = localCmdArgs
+		resultData["local_cmd"] = commandParams.Binary
+		resultData["local_cmd_args"] = commandParams.Args
 	}
 
 	if a.config.SystemPrompt != "" {
@@ -1536,11 +1601,22 @@ func (p localCmdBackend) transcribe(a *app, job jobInput) (map[string]any, error
 	return resultData, nil
 }
 
-// prepare validates the future whisper.cpp backend configuration.
+// prepare resolves whisper-cli, ffmpeg, and the local model before work starts.
 func (p localWhisperCppBackend) prepare(a *app) error {
+	whisperBinaryConfig := binaryConfig{
+		Label: "whisper.cpp binary",
+		Value: a.config.Backend.Binary,
+		Names: []string{"whisper-cli"},
+	}
+	whisperBinary, whisperErr := resolveBinary(whisperBinaryConfig)
+
+	if whisperErr != nil {
+		return whisperErr
+	}
+
 	ffmpegConfig := binaryConfig{
 		Label: "ffmpeg binary",
-		Value: a.config.Backend.FfmpegCmd,
+		Value: a.config.Backend.DecodeBinary,
 		Names: []string{"ffmpeg"},
 	}
 	ffmpegFile, lookErr := resolveBinary(ffmpegConfig)
@@ -1549,14 +1625,248 @@ func (p localWhisperCppBackend) prepare(a *app) error {
 		return lookErr
 	}
 
-	a.config.Backend.FfmpegCmd = ffmpegFile
+	modelFile, modelErr := a.resolveWhisperModelFile()
 
-	return fmt.Errorf("local backend whispercpp is not implemented yet")
+	if modelErr != nil {
+		return modelErr
+	}
+
+	a.config.Backend.Binary = whisperBinary
+	a.config.Backend.DecodeBinary = ffmpegFile
+	a.config.Backend.ModelFile = modelFile
+
+	return nil
 }
 
-// transcribe keeps the localWhisperCppBackend interface complete.
+// transcribe converts input audio to wav, runs whisper-cli, and writes the final txt output.
 func (p localWhisperCppBackend) transcribe(a *app, job jobInput) (map[string]any, error) {
-	return nil, fmt.Errorf("local backend whispercpp is not implemented yet")
+	run, runErr := a.newWhisperRun(job)
+
+	if runErr != nil {
+		return nil, runErr
+	}
+
+	runErr = a.runWhisperCommand(run)
+
+	if runErr != nil {
+		cleanupErr := a.cleanupWhisperRun(run, runErr)
+
+		return nil, cleanupErr
+	}
+
+	transcriptOutput, outputErr := a.finalizeWhisperOutput(run.OutputRef)
+
+	if outputErr != nil {
+		cleanupErr := a.cleanupWhisperRun(run, outputErr)
+
+		return nil, cleanupErr
+	}
+
+	cleanupErr := a.cleanupWhisperRun(run, nil)
+
+	if cleanupErr != nil {
+		return nil, cleanupErr
+	}
+
+	resultData := a.newWhisperResult(job, run, transcriptOutput)
+
+	return resultData, nil
+}
+
+// newWhisperRun prepares the temp wav file, output refs, and command args for one whisper run.
+func (a *app) newWhisperRun(job jobInput) (whisperRun, error) {
+	waveFile, decodeErr := a.decodeWhisperWaveFile(job)
+
+	if decodeErr != nil {
+		return whisperRun{}, decodeErr
+	}
+
+	outputRef := newWhisperOutputRef(job.Files.OutputFile)
+	whisperArgs := a.buildWhisperArgs(waveFile, outputRef)
+	commandParams := cmdParams{
+		Binary: a.config.Backend.Binary,
+		Args:   whisperArgs,
+	}
+	run := whisperRun{
+		WaveFile:  waveFile,
+		OutputRef: outputRef,
+		Cmd:       commandParams,
+	}
+
+	return run, nil
+}
+
+// buildWhisperArgs builds the whisper-cli command args for one prepared run.
+func (a *app) buildWhisperArgs(waveFile string, outputRef whisperOutputRef) []string {
+	whisperArgs := []string{
+		"--model", a.config.Backend.ModelFile,
+		"--file", waveFile,
+		"--language", a.config.Language,
+		"--output-file", outputRef.BaseFile,
+		"--output-txt",
+	}
+
+	if a.config.SystemPrompt != "" {
+		whisperArgs = append(whisperArgs, "--prompt", a.config.SystemPrompt)
+	}
+
+	if a.shouldStreamLocalProgress() {
+		whisperArgs = append(whisperArgs, "--print-progress")
+	} else {
+		whisperArgs = append(whisperArgs, "--no-prints")
+	}
+
+	return whisperArgs
+}
+
+// runWhisperCommand executes one prepared whisper-cli run.
+func (a *app) runWhisperCommand(run whisperRun) error {
+	command := exec.Command(run.Cmd.Binary, run.Cmd.Args...)
+
+	if a.shouldStreamLocalProgress() {
+		command.Stdout = os.Stderr
+		command.Stderr = os.Stderr
+
+		runErr := command.Run()
+
+		if runErr != nil {
+			return fmt.Errorf("whispercpp transcription failed: %w", runErr)
+		}
+
+		return nil
+	}
+
+	commandOutput, runErr := command.CombinedOutput()
+
+	if runErr != nil {
+		errorDetail := string(commandOutput)
+		errorDetail = strings.TrimSpace(errorDetail)
+
+		if errorDetail == "" {
+			errorDetail = runErr.Error()
+		}
+
+		return fmt.Errorf("whispercpp transcription failed: %s", errorDetail)
+	}
+
+	return nil
+}
+
+// cleanupWhisperRun removes the temp wav file and preserves the main run error when needed.
+func (a *app) cleanupWhisperRun(run whisperRun, mainErr error) error {
+	removeErr := os.Remove(run.WaveFile)
+
+	if removeErr != nil && !os.IsNotExist(removeErr) {
+		if mainErr != nil {
+			return fmt.Errorf("%s; failed to remove file: %s", mainErr.Error(), run.WaveFile)
+		}
+
+		return fmt.Errorf("failed to remove file: %s", run.WaveFile)
+	}
+
+	return mainErr
+}
+
+// newWhisperResult builds the final JSON result for one whisper.cpp run.
+func (a *app) newWhisperResult(job jobInput, run whisperRun, transcriptOutput transcriptOutput) map[string]any {
+	resultData := a.newSuccessResult(job, transcriptOutput.Text, transcriptOutput.Size)
+
+	if a.config.Debug {
+		resultData["local_binary"] = run.Cmd.Binary
+		resultData["decode_binary"] = a.config.Backend.DecodeBinary
+		resultData["local_model_file"] = a.config.Backend.ModelFile
+		resultData["local_binary_args"] = run.Cmd.Args
+	}
+
+	return resultData
+}
+
+// decodeWhisperWaveFile converts one input file into a temp mono 16 kHz wav file.
+func (a *app) decodeWhisperWaveFile(job jobInput) (string, error) {
+	tempFile, createErr := os.CreateTemp("", "orb_transcribe_*.wav")
+
+	if createErr != nil {
+		return "", fmt.Errorf("failed to create temp wav file")
+	}
+
+	tempFileName := tempFile.Name()
+	closeErr := tempFile.Close()
+	var jobErr error
+
+	if closeErr != nil {
+		jobErr = fmt.Errorf("failed to prepare temp wav file")
+	}
+
+	if jobErr == nil {
+		decodeArgs := []string{
+			"-hide_banner",
+			"-loglevel", "error",
+			"-y",
+			"-i", job.Files.InputFile,
+			"-ar", "16000",
+			"-ac", "1",
+			"-c:a", "pcm_s16le",
+			tempFileName,
+		}
+		decodeCommand := exec.Command(a.config.Backend.DecodeBinary, decodeArgs...)
+		commandOutput, runErr := decodeCommand.CombinedOutput()
+
+		if runErr != nil {
+			errorDetail := string(commandOutput)
+			errorDetail = strings.TrimSpace(errorDetail)
+
+			if errorDetail == "" {
+				errorDetail = runErr.Error()
+			}
+
+			jobErr = fmt.Errorf("audio decode failed: %s", errorDetail)
+		}
+	}
+
+	if jobErr != nil {
+		removeErr := os.Remove(tempFileName)
+
+		if removeErr != nil && !os.IsNotExist(removeErr) {
+			return "", fmt.Errorf("%s; failed to remove file: %s", jobErr.Error(), tempFileName)
+		}
+
+		return "", jobErr
+	}
+
+	return tempFileName, nil
+}
+
+// finalizeWhisperOutput reads the generated txt file and writes it to the requested result file when needed.
+func (a *app) finalizeWhisperOutput(outputRef whisperOutputRef) (transcriptOutput, error) {
+	transcriptBytes, readErr := os.ReadFile(outputRef.GeneratedFile)
+
+	if readErr != nil {
+		return transcriptOutput{}, fmt.Errorf("failed to read transcript output: %s", outputRef.GeneratedFile)
+	}
+
+	if outputRef.GeneratedFile != outputRef.ResultFile {
+		writeErr := os.WriteFile(outputRef.ResultFile, transcriptBytes, 0644)
+
+		if writeErr != nil {
+			return transcriptOutput{}, fmt.Errorf("failed to write transcript output: %s", outputRef.ResultFile)
+		}
+
+		removeErr := os.Remove(outputRef.GeneratedFile)
+
+		if removeErr != nil && !os.IsNotExist(removeErr) {
+			return transcriptOutput{}, fmt.Errorf("failed to remove file: %s", outputRef.GeneratedFile)
+		}
+	}
+
+	transcriptText := string(transcriptBytes)
+	transcriptText = strings.TrimSpace(transcriptText)
+
+	output := transcriptOutput{
+		Text: transcriptText,
+		Size: len(transcriptBytes),
+	}
+
+	return output, nil
 }
 
 // shouldStreamLocalProgress lets a single local job show provider-native progress.

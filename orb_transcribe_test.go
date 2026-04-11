@@ -147,23 +147,31 @@ func TestResolveModel(t *testing.T) {
 	testCases := []struct {
 		Provider      string
 		ModelValue    string
+		ModelFile     string
 		ExpectedValue string
 	}{
-		{"local", "", "medium"},
-		{"local", "medium", "medium"},
-		{"local", "AAAAA", "medium"},
-		{"local", "large_v3", "large-v3"},
-		{"local", "large-v3", "large-v3"},
-		{"openai", "", "whisper-1"},
-		{"openai", "whisper1", "whisper-1"},
-		{"openai", "AAAAA", "whisper-1"},
+		{"local", "", "", "medium"},
+		{"local", "medium", "", "medium"},
+		{"local", "AAAAA", "", "medium"},
+		{"local", "large_v3", "", "large-v3"},
+		{"local", "large-v3", "", "large-v3"},
+		{"local", "", "/tmp/ggml-large-v3.bin", "large-v3"},
+		{"local", "AAAAA", "/tmp/ggml-large-v3-turbo.bin", "turbo"},
+		{"openai", "", "", "whisper-1"},
+		{"openai", "whisper1", "", "whisper-1"},
+		{"openai", "AAAAA", "", "whisper-1"},
 	}
 
 	for _, testCase := range testCases {
-		actualValue := resolveModel(testCase.Provider, testCase.ModelValue)
+		modelRequest := modelResolveRequest{
+			Provider:  testCase.Provider,
+			Value:     testCase.ModelValue,
+			ModelFile: testCase.ModelFile,
+		}
+		actualValue := resolveModel(modelRequest)
 
 		if actualValue != testCase.ExpectedValue {
-			t.Fatalf("resolveModel(%q, %q) = %q, want %q", testCase.Provider, testCase.ModelValue, actualValue, testCase.ExpectedValue)
+			t.Fatalf("resolveModel(%q, %q, %q) = %q, want %q", testCase.Provider, testCase.ModelValue, testCase.ModelFile, actualValue, testCase.ExpectedValue)
 		}
 	}
 }
@@ -267,12 +275,12 @@ func TestNewCliConfig(t *testing.T) {
 		t.Fatalf("newCliConfig().Model = %q", config.Model)
 	}
 
-	if config.Backend.Cmd != "" {
-		t.Fatalf("newCliConfig().Backend.Cmd = %q", config.Backend.Cmd)
+	if config.Backend.Binary != "" {
+		t.Fatalf("newCliConfig().Backend.Binary = %q", config.Backend.Binary)
 	}
 
-	if config.Backend.FfmpegCmd != "" {
-		t.Fatalf("newCliConfig().Backend.FfmpegCmd = %q", config.Backend.FfmpegCmd)
+	if config.Backend.DecodeBinary != "" {
+		t.Fatalf("newCliConfig().Backend.DecodeBinary = %q", config.Backend.DecodeBinary)
 	}
 
 	if config.Workers < 1 {
