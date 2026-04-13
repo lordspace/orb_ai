@@ -1734,6 +1734,22 @@ func transcribeOpenAiCompat(a *app, job jobInput) (map[string]any, error) {
 	transcriptText = strings.TrimSpace(transcriptText)
 	resultData := a.newSuccessResult(job, transcriptText, len(responseBody))
 
+	// Input metadata and usage tracking
+	inputMeta := map[string]any{}
+
+	inputFileInfo, statErr := os.Stat(job.Files.InputFile)
+
+	if statErr == nil {
+		inputMeta["size"] = inputFileInfo.Size()
+	}
+
+	inputMeta["file"] = job.Files.InputFile
+	resultData["input_meta"] = inputMeta
+
+	resultData["usage"] = map[string]any{
+		"output_size": len(responseBody),
+	}
+
 	if a.config.Debug && httpResponse != nil {
 		apiUrl := "https://api.openai.com/v1/audio/transcriptions"
 
@@ -2600,7 +2616,27 @@ func runSpellcheck(config spellcheckConfig) (map[string]any, error) {
 	}
 
 	resultData["corrections"] = diffCount
-	resultData["output_size"] = len(correctedText)
+
+	// Input metadata
+	inputMeta := map[string]any{
+		"file": config.InputFile,
+		"size": len(content),
+	}
+
+	resultData["input_meta"] = inputMeta
+
+	// Usage / cost tracking
+	usageData := map[string]any{
+		"output_size": len(correctedText),
+	}
+
+	if chatCompletion.Usage.TotalTokens > 0 {
+		usageData["prompt_tokens"] = chatCompletion.Usage.PromptTokens
+		usageData["completion_tokens"] = chatCompletion.Usage.CompletionTokens
+		usageData["total_tokens"] = chatCompletion.Usage.TotalTokens
+	}
+
+	resultData["usage"] = usageData
 
 	if config.Debug {
 		apiUrl := "https://api.openai.com/v1/chat/completions"
