@@ -6,22 +6,12 @@ export APP_PROJECT_DIR=$APP_CUR_SCRIPT_DIR
 export APP_PROJECT_BIN_DIR="$APP_CUR_SCRIPT_DIR/bin"
 export APP_PROJECT_NAME="$(basename "$APP_PROJECT_DIR")"
 export APP_ORB_OPT_FILES_DIR="${ORB_TRANSCRIBE_ORB_OPT_FILES_DIR:-/Users/user/Documents/projects/web/orb_opt/docker/orb_opt/image_debian/files}"
-export GOCACHE="$APP_PROJECT_DIR/.gocache"
-export GOMODCACHE="$APP_PROJECT_DIR/.gomodcache"
 
 export GIT_COMMIT=$(git -C "$APP_PROJECT_DIR" rev-list -1 HEAD 2>/dev/null || echo "unknown")
 export BUILD_DATE=$(date -u +%Y-%m-%d.%H:%M:%S)
 
 if [ ! -d "$APP_PROJECT_BIN_DIR" ]; then
     mkdir -p "$APP_PROJECT_BIN_DIR"
-fi
-
-if [ ! -d "$GOCACHE" ]; then
-    mkdir -p "$GOCACHE"
-fi
-
-if [ ! -d "$GOMODCACHE" ]; then
-    mkdir -p "$GOMODCACHE"
 fi
 
 LDFLAGS="-s -w -X main.AppGitCommit=$GIT_COMMIT -X main.AppBuildDate=$BUILD_DATE"
