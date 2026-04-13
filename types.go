@@ -139,6 +139,12 @@ type localWhisperCppBackend struct{}
 // groqProvider sends audio files to the Groq OpenAI-compatible transcription API.
 type groqProvider struct{}
 
+// providerResult holds the resolved provider name and an optional backend override.
+type providerResult struct {
+	Provider string
+	Backend  string
+}
+
 // preparedInput holds the audio file ready for whisper-cli plus an optional temp file to clean up.
 type preparedInput struct {
 	AudioFile string

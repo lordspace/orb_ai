@@ -358,20 +358,18 @@ func parseArgs(args []string) (cliConfig, error) {
 		providerValue = firstString(providerValue, getEnv("ORB_TRANSCRIBE_PROVIDER"))
 	}
 
-	provider := resolveProvider(providerValue, apiKey)
+	providerResolved := resolveProvider(providerValue, apiKey)
+	provider := providerResolved.Provider
+	providerBackendOverride := providerResolved.Backend
 
 	if provider == "" {
 		return cliConfig{}, fmt.Errorf("unsupported provider: %s", providerValue)
 	}
 
-	providerEnvScope := ""
-
-	if provider != "" {
-		providerEnvScope = "PROVIDER_" + strings.ToUpper(provider)
-	}
+	providerEnvScope := "PROVIDER_" + strings.ToUpper(provider)
 
 	// Provider-scoped API key lookup (e.g. ORB_TRANSCRIBE_PROVIDER_GROQ_API_KEY)
-	if apiKey == "" && isRemoteProvider(provider) && providerEnvScope != "" {
+	if apiKey == "" && isRemoteProvider(provider) {
 		apiKey = firstString(
 			lookupEnv(providerEnvScope, "API_KEY"),
 		)
@@ -393,7 +391,12 @@ func parseArgs(args []string) (cliConfig, error) {
 
 	localBackendValue := firstString(*localBackendLong)
 
-	if !hasExplicitOption(normalizedArgs, "--local-backend") {
+	// Provider alias (e.g. -p local-py) can imply a specific backend
+	if localBackendValue == "" && providerBackendOverride != "" {
+		localBackendValue = providerBackendOverride
+	}
+
+	if !hasExplicitOption(normalizedArgs, "--local-backend") && providerBackendOverride == "" {
 		localBackendValue = firstString(
 			lookupEnv(providerEnvScope, "BACKEND", "ORB_TRANSCRIBE_LOCAL_BACKEND"),
 			localBackendValue,
@@ -921,38 +924,51 @@ func resolveSystemPrompt(promptText string, promptFile string) (string, error) {
 }
 
 // normalizeProvider maps aliases to the internal provider names.
-func normalizeProvider(value string) string {
+// Some aliases (local-py, local-python) also imply a specific local backend.
+func normalizeProvider(value string) providerResult {
 	normalizedValue := normalizeDashedValue(value)
+	result := providerResult{}
 
 	switch normalizedValue {
 	case "local", "whisper", "faster-whisper", "fw":
-		return "local"
+		result.Provider = "local"
+	case "local-py", "local-python", "python", "py":
+		result.Provider = "local"
+		result.Backend = "cmd"
 	case "openai", "api", "oai":
-		return "openai"
+		result.Provider = "openai"
 	case "groq":
-		return "groq"
-	default:
-		return ""
+		result.Provider = "groq"
 	}
+
+	return result
 }
 
 // resolveProvider chooses the provider from explicit input or available credentials.
-func resolveProvider(value string, openAiApiKey string) string {
-	provider := normalizeProvider(value)
+func resolveProvider(value string, apiKey string) providerResult {
+	normalizedProvider := normalizeProvider(value)
 
-	if provider != "" {
-		return provider
+	if normalizedProvider.Provider != "" {
+		return normalizedProvider
 	}
 
-	if strings.TrimSpace(value) != "" {
-		return ""
+	valueTrimmed := strings.TrimSpace(value)
+
+	if valueTrimmed != "" {
+		emptyResult := providerResult{}
+		return emptyResult
 	}
 
-	if strings.TrimSpace(openAiApiKey) != "" {
-		return "openai"
+	apiKeyTrimmed := strings.TrimSpace(apiKey)
+
+	if apiKeyTrimmed != "" {
+		normalizedProvider.Provider = "openai"
+		return normalizedProvider
 	}
 
-	return "local"
+	normalizedProvider.Provider = "local"
+
+	return normalizedProvider
 }
 
 // normalizeLocalBackend maps aliases to the internal local backend names.

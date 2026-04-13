@@ -33,25 +33,38 @@ func TestNormalizeCliArgs(t *testing.T) {
 
 // TestNormalizeProvider covers the supported provider aliases.
 func TestNormalizeProvider(t *testing.T) {
-	testCases := map[string]string{
-		"":               "",
-		"local":          "local",
-		"whisper":        "local",
-		"faster-whisper": "local",
-		"faster_whisper": "local",
-		"fw":             "local",
-		"openai":         "openai",
-		"api":            "openai",
-		"oai":            "openai",
-		"groq":           "groq",
-		"something-else": "",
+	testCases := []struct {
+		Input            string
+		ExpectedProvider string
+		ExpectedBackend  string
+	}{
+		{"", "", ""},
+		{"local", "local", ""},
+		{"whisper", "local", ""},
+		{"faster-whisper", "local", ""},
+		{"faster_whisper", "local", ""},
+		{"fw", "local", ""},
+		{"local-py", "local", "cmd"},
+		{"local-python", "local", "cmd"},
+		{"local_python", "local", "cmd"},
+		{"python", "local", "cmd"},
+		{"py", "local", "cmd"},
+		{"openai", "openai", ""},
+		{"api", "openai", ""},
+		{"oai", "openai", ""},
+		{"groq", "groq", ""},
+		{"something-else", "", ""},
 	}
 
-	for inputValue, expectedValue := range testCases {
-		actualValue := normalizeProvider(inputValue)
+	for _, tc := range testCases {
+		result := normalizeProvider(tc.Input)
 
-		if actualValue != expectedValue {
-			t.Fatalf("normalizeProvider(%q) = %q, want %q", inputValue, actualValue, expectedValue)
+		if result.Provider != tc.ExpectedProvider {
+			t.Fatalf("normalizeProvider(%q).Provider = %q, want %q", tc.Input, result.Provider, tc.ExpectedProvider)
+		}
+
+		if result.Backend != tc.ExpectedBackend {
+			t.Fatalf("normalizeProvider(%q).Backend = %q, want %q", tc.Input, result.Backend, tc.ExpectedBackend)
 		}
 	}
 }
@@ -59,24 +72,31 @@ func TestNormalizeProvider(t *testing.T) {
 // TestResolveProvider applies the default provider rule around API keys.
 func TestResolveProvider(t *testing.T) {
 	testCases := []struct {
-		ProviderValue string
-		ApiKey        string
-		ExpectedValue string
+		ProviderValue    string
+		ApiKey           string
+		ExpectedProvider string
+		ExpectedBackend  string
 	}{
-		{"", "", "local"},
-		{"", "test-key", "openai"},
-		{"local", "test-key", "local"},
-		{"openai", "", "openai"},
-		{"groq", "", "groq"},
-		{"groq", "test-key", "groq"},
-		{"bad-provider", "", ""},
+		{"", "", "local", ""},
+		{"", "test-key", "openai", ""},
+		{"local", "test-key", "local", ""},
+		{"openai", "", "openai", ""},
+		{"groq", "", "groq", ""},
+		{"groq", "test-key", "groq", ""},
+		{"local-py", "", "local", "cmd"},
+		{"python", "test-key", "local", "cmd"},
+		{"bad-provider", "", "", ""},
 	}
 
-	for _, testCase := range testCases {
-		actualValue := resolveProvider(testCase.ProviderValue, testCase.ApiKey)
+	for _, tc := range testCases {
+		result := resolveProvider(tc.ProviderValue, tc.ApiKey)
 
-		if actualValue != testCase.ExpectedValue {
-			t.Fatalf("resolveProvider(%q, %q) = %q, want %q", testCase.ProviderValue, testCase.ApiKey, actualValue, testCase.ExpectedValue)
+		if result.Provider != tc.ExpectedProvider {
+			t.Fatalf("resolveProvider(%q, %q).Provider = %q, want %q", tc.ProviderValue, tc.ApiKey, result.Provider, tc.ExpectedProvider)
+		}
+
+		if result.Backend != tc.ExpectedBackend {
+			t.Fatalf("resolveProvider(%q, %q).Backend = %q, want %q", tc.ProviderValue, tc.ApiKey, result.Backend, tc.ExpectedBackend)
 		}
 	}
 }
