@@ -1,4 +1,4 @@
-module orb_transcribe
+module orb_ai
 
 go 1.24
 

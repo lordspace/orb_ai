@@ -150,3 +150,17 @@ type preparedInput struct {
 	AudioFile string
 	TempFile  string
 }
+
+// spellcheckConfig keeps the spellcheck subcommand configuration.
+type spellcheckConfig struct {
+	InputFile    string
+	OutputFile   string
+	Language     string
+	Provider     string
+	Model        string
+	ApiKey       string
+	ApiBaseUrl   string
+	SystemPrompt string
+	Inline       bool
+	Debug        bool
+}

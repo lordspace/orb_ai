@@ -21,12 +21,12 @@ import (
 	"github.com/openai/openai-go/v3/option"
 )
 
-var AppName = "orb_transcribe"
-var AppVer = "0.1.0"
+var AppName = "orb_ai"
+var AppVer = "1.0.0"
 var AppBuildDate = ""
 var AppGitCommit = ""
 
-const appEnvPrefix = "ORB_TRANSCRIBE"
+const appEnvPrefix = "ORB_AI"
 
 var supportedMediaExtensions = map[string]bool{
 	".aac":  true,
@@ -142,12 +142,58 @@ func (config cliConfig) validate() error {
 	return nil
 }
 
+// resolveSubcommand extracts the subcommand from args, defaulting to "transcribe".
+func resolveSubcommand(args []string) (string, []string) {
+	if len(args) == 0 {
+		return "transcribe", args
+	}
+
+	firstArg := args[0]
+
+	// If first arg starts with - it's a flag, not a subcommand — default to transcribe
+	if len(firstArg) > 0 && firstArg[0] == '-' {
+		return "transcribe", args
+	}
+
+	validSubcommands := map[string]bool{
+		"transcribe": true,
+		"spellcheck": true,
+	}
+
+	firstArgLower := strings.ToLower(firstArg)
+
+	if validSubcommands[firstArgLower] {
+		return firstArgLower, args[1:]
+	}
+
+	// Not a known subcommand — treat as positional arg, default to transcribe
+	return "transcribe", args
+}
+
 // main runs the app and prints the final JSON result.
 func main() {
+	subcommand, subArgs := resolveSubcommand(os.Args[1:])
+
+	switch subcommand {
+	case "transcribe":
+		runTranscribeCommand(subArgs)
+	case "spellcheck":
+		runSpellcheckCommand(subArgs)
+	default:
+		resultRecord := newBaseResult()
+		resultRecord.Msg = "error: unknown subcommand: " + subcommand
+		writeResult(resultRecord)
+		os.Exit(255)
+	}
+}
+
+// runTranscribeCommand handles the transcribe subcommand (default).
+func runTranscribeCommand(args []string) {
 	resultRecord := newBaseResult()
+	resultRecord.Data["command"] = "transcribe"
 	exitCode := 0
 
-	config, parseErr := parseArgs(os.Args[1:])
+	config, parseErr := parseArgs(args)
 
 	if parseErr != nil {
 		resultRecord.Msg = "error: " + parseErr.Error()
@@ -171,6 +217,41 @@ func main() {
 
 	if processErr != nil {
 		resultRecord.Msg = "error: " + processErr.Error()
+		exitCode = 255
+	} else {
+		resultRecord.Status = true
+	}
+
+	writeResult(resultRecord)
+	os.Exit(exitCode)
+}
+
+// runSpellcheckCommand handles the spellcheck subcommand.
+func runSpellcheckCommand(args []string) {
+	resultRecord := newBaseResult()
+	resultRecord.Data["command"] = "spellcheck"
+	exitCode := 0
+
+	spellConfig, parseErr := parseSpellcheckArgs(args)
+
+	if parseErr != nil {
+		resultRecord.Msg = "error: " + parseErr.Error()
+
+		writeResult(resultRecord)
+		os.Exit(255)
+	}
+
+	resultRecord.Data["provider"] = spellConfig.Provider
+	resultRecord.Data["model"] = spellConfig.Model
+
+	spellResult, spellErr := runSpellcheck(spellConfig)
+
+	if spellResult != nil {
+		mergeMaps(resultRecord.Data, spellResult)
+	}
+
+	if spellErr != nil {
+		resultRecord.Msg = "error: " + spellErr.Error()
 		exitCode = 255
 	} else {
 		resultRecord.Status = true
@@ -345,9 +426,9 @@ func parseArgs(args []string) (cliConfig, error) {
 		apiKey = firstString(
 			apiKey,
 			getEnv(
-				"ORB_TRANSCRIBE_PROVIDER_OPENAI_API_KEY",
-				"ORB_TRANSCRIBE_OPENAI_API_KEY",
-				"ORB_TRANSCRIBE_API_KEY",
+				"ORB_AI_PROVIDER_OPENAI_API_KEY",
+				"ORB_AI_OPENAI_API_KEY",
+				"ORB_AI_API_KEY",
 			),
 		)
 	}
@@ -355,7 +436,7 @@ func parseArgs(args []string) (cliConfig, error) {
 	providerValue := firstString(*providerShort, *providerLong)
 
 	if !hasExplicitOption(normalizedArgs, "-p", "--provider") {
-		providerValue = firstString(providerValue, getEnv("ORB_TRANSCRIBE_PROVIDER"))
+		providerValue = firstString(providerValue, getEnv("ORB_AI_PROVIDER"))
 	}
 
 	providerResolved := resolveProvider(providerValue, apiKey)
@@ -368,7 +449,7 @@ func parseArgs(args []string) (cliConfig, error) {
 
 	providerEnvScope := "PROVIDER_" + strings.ToUpper(provider)
 
-	// Provider-scoped API key lookup (e.g. ORB_TRANSCRIBE_PROVIDER_GROQ_API_KEY)
+	// Provider-scoped API key lookup (e.g. ORB_AI_PROVIDER_GROQ_API_KEY)
 	if apiKey == "" && isRemoteProvider(provider) {
 		apiKey = firstString(
 			lookupEnv(providerEnvScope, "API_KEY"),
@@ -379,7 +460,7 @@ func parseArgs(args []string) (cliConfig, error) {
 
 	if !hasExplicitOption(normalizedArgs, "--api-base-url") {
 		apiBaseUrl = firstString(
-			lookupEnv(providerEnvScope, "API_BASE_URL", "ORB_TRANSCRIBE_API_BASE_URL"),
+			lookupEnv(providerEnvScope, "API_BASE_URL", "ORB_AI_API_BASE_URL"),
 			apiBaseUrl,
 		)
 	}
@@ -398,7 +479,7 @@ func parseArgs(args []string) (cliConfig, error) {
 
 	if !hasExplicitOption(normalizedArgs, "--local-backend") && providerBackendOverride == "" {
 		localBackendValue = firstString(
-			lookupEnv(providerEnvScope, "BACKEND", "ORB_TRANSCRIBE_LOCAL_BACKEND"),
+			lookupEnv(providerEnvScope, "BACKEND", "ORB_AI_LOCAL_BACKEND"),
 			localBackendValue,
 		)
 	}
@@ -416,10 +497,10 @@ func parseArgs(args []string) (cliConfig, error) {
 			lookupEnv(
 				providerEnvScope,
 				"BINARY",
-				"ORB_TRANSCRIBE_PROVIDER_LOCAL_BINARY",
-				"ORB_TRANSCRIBE_LOCAL_BINARY",
-				"ORB_TRANSCRIBE_PROVIDER_LOCAL_CMD",
-				"ORB_TRANSCRIBE_LOCAL_CMD",
+				"ORB_AI_PROVIDER_LOCAL_BINARY",
+				"ORB_AI_LOCAL_BINARY",
+				"ORB_AI_PROVIDER_LOCAL_CMD",
+				"ORB_AI_LOCAL_CMD",
 			),
 			backendBinaryValue,
 		)
@@ -429,7 +510,7 @@ func parseArgs(args []string) (cliConfig, error) {
 
 	if !hasExplicitOption(normalizedArgs, "--ffmpeg-binary", "--ffmpeg-cmd") {
 		ffmpegBinaryValue = firstString(
-			lookupEnv(providerEnvScope, "FFMPEG_BINARY", "ORB_TRANSCRIBE_FFMPEG_BINARY", "ORB_TRANSCRIBE_FFMPEG_CMD"),
+			lookupEnv(providerEnvScope, "FFMPEG_BINARY", "ORB_AI_FFMPEG_BINARY", "ORB_AI_FFMPEG_CMD"),
 			ffmpegBinaryValue,
 		)
 	}
@@ -438,7 +519,7 @@ func parseArgs(args []string) (cliConfig, error) {
 
 	if !hasExplicitOption(normalizedArgs, "--model-dir", "--whispercpp-model-dir") {
 		modelDir = firstString(
-			lookupEnv(providerEnvScope, "MODEL_DIR", "ORB_TRANSCRIBE_MODEL_DIR", "ORB_TRANSCRIBE_WHISPERCPP_MODEL_DIR"),
+			lookupEnv(providerEnvScope, "MODEL_DIR", "ORB_AI_MODEL_DIR", "ORB_AI_WHISPERCPP_MODEL_DIR"),
 			modelDir,
 		)
 	}
@@ -447,7 +528,7 @@ func parseArgs(args []string) (cliConfig, error) {
 
 	if !hasExplicitOption(normalizedArgs, "--model-file", "--whispercpp-model-file") {
 		modelFile = firstString(
-			lookupEnv(providerEnvScope, "MODEL_FILE", "ORB_TRANSCRIBE_MODEL_FILE", "ORB_TRANSCRIBE_WHISPERCPP_MODEL_FILE"),
+			lookupEnv(providerEnvScope, "MODEL_FILE", "ORB_AI_MODEL_FILE", "ORB_AI_WHISPERCPP_MODEL_FILE"),
 			modelFile,
 		)
 	}
@@ -456,7 +537,7 @@ func parseArgs(args []string) (cliConfig, error) {
 
 	if !hasExplicitOption(normalizedArgs, "-l", "--language", "--lang") {
 		languageValue = firstString(
-			lookupEnv(providerEnvScope, "LANGUAGE", "ORB_TRANSCRIBE_LANGUAGE"),
+			lookupEnv(providerEnvScope, "LANGUAGE", "ORB_AI_LANGUAGE"),
 			languageValue,
 		)
 	}
@@ -466,7 +547,7 @@ func parseArgs(args []string) (cliConfig, error) {
 
 	if !hasExplicitOption(normalizedArgs, "-F", "--format") {
 		outputFormatValue = firstString(
-			lookupEnv(providerEnvScope, "FORMAT", "ORB_TRANSCRIBE_FORMAT"),
+			lookupEnv(providerEnvScope, "FORMAT", "ORB_AI_FORMAT"),
 			outputFormatValue,
 		)
 	}
@@ -475,21 +556,21 @@ func parseArgs(args []string) (cliConfig, error) {
 
 	if !hasExplicitOption(normalizedArgs, "--model") {
 		modelValue = firstString(
-			lookupEnv(providerEnvScope, "MODEL", "ORB_TRANSCRIBE_MODEL"),
+			lookupEnv(providerEnvScope, "MODEL", "ORB_AI_MODEL"),
 			modelValue,
 		)
 	}
 
 	if !hasExplicitOption(normalizedArgs, "--system-prompt", "--prompt") {
 		systemPromptRaw = firstString(
-			lookupEnv(providerEnvScope, "SYSTEM_PROMPT", "ORB_TRANSCRIBE_SYSTEM_PROMPT"),
+			lookupEnv(providerEnvScope, "SYSTEM_PROMPT", "ORB_AI_SYSTEM_PROMPT"),
 			systemPromptRaw,
 		)
 	}
 
 	if !hasExplicitOption(normalizedArgs, "--system-prompt-file", "--prompt-file") {
 		systemPromptFileRaw = firstString(
-			lookupEnv(providerEnvScope, "SYSTEM_PROMPT_FILE", "ORB_TRANSCRIBE_SYSTEM_PROMPT_FILE"),
+			lookupEnv(providerEnvScope, "SYSTEM_PROMPT_FILE", "ORB_AI_SYSTEM_PROMPT_FILE"),
 			systemPromptFileRaw,
 		)
 	}
@@ -510,7 +591,7 @@ func parseArgs(args []string) (cliConfig, error) {
 	workers := *workersLong
 
 	if !hasExplicitOption(normalizedArgs, "--workers") {
-		envWorkers := getEnvInt("ORB_TRANSCRIBE_WORKERS")
+		envWorkers := getEnvInt("ORB_AI_WORKERS")
 
 		if envWorkers > 0 {
 			workers = envWorkers
@@ -523,7 +604,7 @@ func parseArgs(args []string) (cliConfig, error) {
 
 	progress := *progressLong
 
-	progressEnvValue := getEnv("ORB_TRANSCRIBE_PROGRESS")
+	progressEnvValue := getEnv("ORB_AI_PROGRESS")
 
 	if !hasExplicitOption(normalizedArgs, "--progress") && IsTrue(progressEnvValue) {
 		progress = true
@@ -531,7 +612,7 @@ func parseArgs(args []string) (cliConfig, error) {
 
 	debug := *debugLong
 
-	debugEnvValue := getEnv("ORB_TRANSCRIBE_DEBUG")
+	debugEnvValue := getEnv("ORB_AI_DEBUG")
 
 	if !hasExplicitOption(normalizedArgs, "--debug") && IsTrue(debugEnvValue) {
 		debug = true
@@ -2025,7 +2106,7 @@ func (a *app) newWhisperResult(job jobInput, run whisperRun, transcriptOutput tr
 // Ogg is used instead of wav because whisper-cli reads it natively and it is
 // much smaller than uncompressed wav — important for large audio files.
 func (a *app) decodeWhisperAudioFile(job jobInput) (string, error) {
-	tempFile, createErr := os.CreateTemp("", "orb_transcribe_*.ogg")
+	tempFile, createErr := os.CreateTemp("", "orb_ai_*.ogg")
 
 	if createErr != nil {
 		return "", fmt.Errorf("failed to create temp audio file")
@@ -2215,4 +2296,322 @@ func (a *app) printProgress(current int, total int, label string) {
 	a.progressMu.Lock()
 	_, _ = fmt.Fprintln(os.Stderr, progressMessage)
 	a.progressMu.Unlock()
+}
+
+// =============================================================================
+// Spellcheck subcommand
+// =============================================================================
+
+// parseSpellcheckArgs reads flags for the spellcheck subcommand.
+func parseSpellcheckArgs(args []string) (spellcheckConfig, error) {
+	config := spellcheckConfig{
+		Language: "en",
+		Provider: "openai",
+		Model:    "",
+	}
+
+	flagSet := flag.NewFlagSet("spellcheck", flag.ContinueOnError)
+	flagSet.SetOutput(os.Stderr)
+
+	fileShort := flagSet.String("f", "", "Input text file")
+	fileLong := flagSet.String("file", "", "Input text file")
+	outputShort := flagSet.String("o", "", "Output file")
+	outputLong := flagSet.String("output-file", "", "Output file")
+	languageShort := flagSet.String("l", config.Language, "Language code")
+	languageLong := flagSet.String("language", "", "Language code")
+	langLong := flagSet.String("lang", "", "Language code")
+	providerShort := flagSet.String("p", "", "Provider (openai, groq)")
+	providerLong := flagSet.String("provider", "", "Provider (openai, groq)")
+	apiKeyShort := flagSet.String("k", "", "API key")
+	apiKeyLong := flagSet.String("api-key", "", "API key")
+	openAiApiKeyLong := flagSet.String("openai-api-key", "", "API key (backward compat)")
+	apiBaseUrlLong := flagSet.String("api-base-url", "", "Override API base URL")
+	modelLong := flagSet.String("model", "", "Model name")
+	systemPromptLong := flagSet.String("system-prompt", "", "Additional context for spellcheck")
+	promptLong := flagSet.String("prompt", "", "Additional context for spellcheck")
+	inlineLong := flagSet.Bool("inline", false, "Overwrite original file")
+	inplaceLong := flagSet.Bool("inplace", false, "Overwrite original file")
+	overrideLong := flagSet.Bool("override", false, "Overwrite original file")
+	debugLong := flagSet.Bool("debug", false, "Include debug fields")
+
+	normalizedArgs := normalizeCliArgs(args)
+	parseErr := flagSet.Parse(normalizedArgs)
+
+	if parseErr != nil {
+		return spellcheckConfig{}, parseErr
+	}
+
+	inputFileRaw := firstString(*fileShort, *fileLong)
+
+	if inputFileRaw == "" {
+		positionalArgs := flagSet.Args()
+		inputFileRaw = firstArg(positionalArgs)
+	}
+
+	if inputFileRaw == "" {
+		return spellcheckConfig{}, fmt.Errorf("missing required option: -f file")
+	}
+
+	inputFileRequest := newInputRefRequest(inputFileRaw, "file")
+	inputFileInfo, resolveErr := resolveInputRef(inputFileRequest)
+
+	if resolveErr != nil {
+		return spellcheckConfig{}, resolveErr
+	}
+
+	config.InputFile = inputFileInfo.ResolvedFile
+	config.OutputFile = firstString(*outputShort, *outputLong)
+	config.Inline = *inlineLong || *inplaceLong || *overrideLong
+
+	// Language
+	languageValue := firstString(*languageLong, *langLong, *languageShort)
+	config.Language = normalizeLanguage(languageValue)
+
+	// API key
+	apiKey := firstString(*apiKeyShort, *openAiApiKeyLong, *apiKeyLong)
+
+	if apiKey == "" {
+		apiKey = getEnv(
+			"ORB_AI_PROVIDER_OPENAI_API_KEY",
+			"ORB_AI_OPENAI_API_KEY",
+			"ORB_AI_API_KEY",
+		)
+	}
+
+	config.ApiKey = apiKey
+
+	// Provider
+	providerValue := firstString(*providerShort, *providerLong)
+
+	if providerValue == "" {
+		providerValue = getEnv("ORB_AI_PROVIDER")
+	}
+
+	if providerValue == "" && apiKey != "" {
+		providerValue = "openai"
+	}
+
+	if providerValue == "" {
+		return spellcheckConfig{}, fmt.Errorf("spellcheck requires a remote provider (-p openai or -p groq) with an API key (-k)")
+	}
+
+	providerNormalized := normalizeProvider(providerValue)
+	config.Provider = providerNormalized.Provider
+
+	if config.Provider == "" {
+		return spellcheckConfig{}, fmt.Errorf("unsupported provider: %s", providerValue)
+	}
+
+	if !isRemoteProvider(config.Provider) {
+		return spellcheckConfig{}, fmt.Errorf("spellcheck requires a remote provider (openai, groq), not: %s", config.Provider)
+	}
+
+	if config.ApiKey == "" {
+		return spellcheckConfig{}, fmt.Errorf("api key required for %s provider", config.Provider)
+	}
+
+	// API base URL
+	apiBaseUrl := firstString(*apiBaseUrlLong)
+
+	if apiBaseUrl == "" {
+		apiBaseUrl = defaultApiBaseUrl(config.Provider)
+	}
+
+	config.ApiBaseUrl = apiBaseUrl
+
+	// Model
+	modelValue := firstString(*modelLong)
+
+	if modelValue == "" {
+		modelValue = defaultSpellcheckModel(config.Provider)
+	}
+
+	config.Model = modelValue
+
+	// System prompt
+	systemPromptValue := firstString(*systemPromptLong, *promptLong)
+	config.SystemPrompt = systemPromptValue
+
+	config.Debug = *debugLong
+
+	// Build output file if not specified
+	if config.OutputFile == "" && !config.Inline {
+		inputInfo := filepath.Ext(config.InputFile)
+		inputBase := strings.TrimSuffix(config.InputFile, inputInfo)
+		config.OutputFile = inputBase + "_spellchecked" + inputInfo
+	}
+
+	if config.Inline {
+		config.OutputFile = config.InputFile
+	}
+
+	return config, nil
+}
+
+// defaultSpellcheckModel returns the default chat model for each provider.
+func defaultSpellcheckModel(provider string) string {
+	switch provider {
+	case "openai":
+		return "gpt-4o-mini"
+	case "groq":
+		return "llama-3.1-8b-instant"
+	default:
+		return "gpt-4o-mini"
+	}
+}
+
+// runSpellcheck sends text to the chat API for spelling and grammar correction.
+func runSpellcheck(config spellcheckConfig) (map[string]any, error) {
+	resultData := map[string]any{
+		"file":        config.InputFile,
+		"output_file": config.OutputFile,
+		"language":    config.Language,
+		"inline":      config.Inline,
+	}
+
+	contentBytes, readErr := os.ReadFile(config.InputFile)
+
+	if readErr != nil {
+		return resultData, fmt.Errorf("failed to read file: %s", config.InputFile)
+	}
+
+	content := string(contentBytes)
+	contentTrimmed := strings.TrimSpace(content)
+
+	if contentTrimmed == "" {
+		// Empty file — write as-is
+		writeErr := os.WriteFile(config.OutputFile, contentBytes, 0644)
+
+		if writeErr != nil {
+			return resultData, fmt.Errorf("failed to write output: %s", config.OutputFile)
+		}
+
+		resultData["corrections"] = 0
+
+		return resultData, nil
+	}
+
+	// Build the system prompt
+	langNames := map[string]string{
+		"en":   "English",
+		"bg":   "Bulgarian",
+		"auto": "the detected language",
+	}
+
+	langName := langNames[config.Language]
+
+	if langName == "" {
+		langName = config.Language
+	}
+
+	systemMsg := "You are a professional proofreader. Fix all spelling and grammar errors in the following text. "
+	systemMsg += "The text is in " + langName + ". "
+	systemMsg += "Return ONLY the corrected text with no explanations, no markdown formatting, no preamble. "
+	systemMsg += "Preserve the original formatting, line breaks, and structure exactly."
+
+	if config.SystemPrompt != "" {
+		systemMsg += " Additional context: " + config.SystemPrompt
+	}
+
+	// Build API request
+	clientOpts := []option.RequestOption{
+		option.WithAPIKey(config.ApiKey),
+	}
+
+	if config.ApiBaseUrl != "" {
+		clientOpts = append(clientOpts, option.WithBaseURL(config.ApiBaseUrl))
+	}
+
+	client := openai.NewClient(clientOpts...)
+
+	requestParams := openai.ChatCompletionNewParams{
+		Model: openai.ChatModel(config.Model),
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			openai.SystemMessage(systemMsg),
+			openai.UserMessage(content),
+		},
+		Temperature: openai.Float(0.1),
+	}
+
+	requestContext, cancelRequest := context.WithTimeout(context.Background(), 5*time.Minute)
+
+	defer cancelRequest()
+
+	chatCompletion, requestErr := client.Chat.Completions.New(requestContext, requestParams)
+
+	if requestErr != nil {
+		return resultData, fmt.Errorf("%s spellcheck request failed: %w", config.Provider, requestErr)
+	}
+
+	correctedText := ""
+
+	if len(chatCompletion.Choices) > 0 {
+		correctedText = chatCompletion.Choices[0].Message.Content
+	}
+
+	if correctedText == "" {
+		return resultData, fmt.Errorf("API returned empty response")
+	}
+
+	// Write to tmp file then rename atomically
+	outputDir := filepath.Dir(config.OutputFile)
+	outputBase := filepath.Base(config.OutputFile)
+	tmpFile := filepath.Join(outputDir, "."+outputBase+".orb_ai_tmp")
+
+	writeErr := os.WriteFile(tmpFile, []byte(correctedText), 0644)
+
+	if writeErr != nil {
+		return resultData, fmt.Errorf("failed to write temp output: %s", tmpFile)
+	}
+
+	renameErr := os.Rename(tmpFile, config.OutputFile)
+
+	if renameErr != nil {
+		os.Remove(tmpFile)
+
+		return resultData, fmt.Errorf("failed to rename temp output to: %s", config.OutputFile)
+	}
+
+	// Count corrections (rough word diff)
+	originalWords := strings.Fields(contentTrimmed)
+	correctedWords := strings.Fields(strings.TrimSpace(correctedText))
+	diffCount := 0
+	maxLen := len(originalWords)
+
+	if len(correctedWords) > maxLen {
+		maxLen = len(correctedWords)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		origWord := ""
+		corrWord := ""
+
+		if i < len(originalWords) {
+			origWord = originalWords[i]
+		}
+
+		if i < len(correctedWords) {
+			corrWord = correctedWords[i]
+		}
+
+		if origWord != corrWord {
+			diffCount++
+		}
+	}
+
+	resultData["corrections"] = diffCount
+	resultData["output_size"] = len(correctedText)
+
+	if config.Debug {
+		apiUrl := "https://api.openai.com/v1/chat/completions"
+
+		if config.ApiBaseUrl != "" {
+			apiUrl = config.ApiBaseUrl + "/chat/completions"
+		}
+
+		resultData["api_url"] = apiUrl
+		resultData["model"] = config.Model
+	}
+
+	return resultData, nil
 }

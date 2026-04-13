@@ -5,7 +5,7 @@ export APP_CUR_SCRIPT_DIR=$(dirname "$APP_CUR_FILE")
 export APP_PROJECT_DIR=$APP_CUR_SCRIPT_DIR
 export APP_PROJECT_BIN_DIR="$APP_CUR_SCRIPT_DIR/bin"
 export APP_PROJECT_NAME="$(basename "$APP_PROJECT_DIR")"
-export APP_ORB_OPT_FILES_DIR="${ORB_TRANSCRIBE_ORB_OPT_FILES_DIR:-/Users/user/Documents/projects/web/orb_opt/docker/orb_opt/image_debian/files}"
+export APP_ORB_OPT_FILES_DIR="${ORB_AI_ORB_OPT_FILES_DIR:-/Users/user/Documents/projects/web/orb_opt/docker/orb_opt/image_debian/files}"
 
 export GIT_COMMIT=$(git -C "$APP_PROJECT_DIR" rev-list -1 HEAD 2>/dev/null || echo "unknown")
 export BUILD_DATE=$(date -u +%Y-%m-%d.%H:%M:%S)
@@ -57,7 +57,7 @@ if [ ! -d "$APP_ORB_OPT_FILES_DIR" ]; then
 fi
 
 APP_LINUX_BINARY="$APP_PROJECT_BIN_DIR/$APP_PROJECT_NAME"
-APP_IMAGE_BINARY="$APP_ORB_OPT_FILES_DIR/orb_transcribe"
+APP_IMAGE_BINARY="$APP_ORB_OPT_FILES_DIR/orb_ai"
 
 if [ -f "$APP_LINUX_BINARY" ]; then
     cp "$APP_LINUX_BINARY" "$APP_IMAGE_BINARY"

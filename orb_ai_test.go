@@ -103,10 +103,10 @@ func TestResolveProvider(t *testing.T) {
 
 // TestLookupEnv prefers the scoped app env over generic fallback names.
 func TestLookupEnv(t *testing.T) {
-	t.Setenv("ORB_TRANSCRIBE_MODEL", "small")
-	t.Setenv("ORB_TRANSCRIBE_PROVIDER_LOCAL_MODEL", "large-v3")
+	t.Setenv("ORB_AI_MODEL", "small")
+	t.Setenv("ORB_AI_PROVIDER_LOCAL_MODEL", "large-v3")
 
-	actualValue := lookupEnv("PROVIDER_LOCAL", "MODEL", "ORB_TRANSCRIBE_MODEL")
+	actualValue := lookupEnv("PROVIDER_LOCAL", "MODEL", "ORB_AI_MODEL")
 
 	if actualValue != "large-v3" {
 		t.Fatalf("lookupEnv() = %q, want %q", actualValue, "large-v3")
