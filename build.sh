@@ -106,7 +106,10 @@ fi
 YEAR=$(date +%Y)
 APP_PROJECT_BAK_DIR_EXT="$HOME/Dropbox/Business/$YEAR/Backups/go/$APP_PROJECT_NAME"
 
-if [ -d "$HOME/Dropbox/Business" ]; then
+if [ ! -d "$HOME/Dropbox/Business" ]; then
+    echo "Warning: Dropbox directory not found: $HOME/Dropbox/Business"
+    echo "Skipping project backup and software copy."
+else
     if [ ! -d "$APP_PROJECT_BAK_DIR_EXT" ]; then
         mkdir -p "$APP_PROJECT_BAK_DIR_EXT"
     fi
