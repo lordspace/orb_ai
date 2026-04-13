@@ -1732,15 +1732,22 @@ func (p localCmdBackend) prepare(a *app) error {
 
 // transcribe shells out to the local qs_transcribe-compatible binary.
 func (p localCmdBackend) transcribe(a *app, job jobInput) (map[string]any, error) {
+	cmdArgs := []string{
+		"--file", job.Files.InputFile,
+		"--lang", a.config.Language,
+		"--model", a.config.Model,
+		"--output-file", job.Files.OutputFile,
+	}
+
+	if a.config.SystemPrompt != "" {
+		cmdArgs = append(cmdArgs, "--system-prompt", a.config.SystemPrompt)
+	}
+
 	commandParams := cmdParams{
 		Binary: a.config.Backend.Binary,
-		Args: []string{
-			"--file", job.Files.InputFile,
-			"--lang", a.config.Language,
-			"--model", a.config.Model,
-			"--output-file", job.Files.OutputFile,
-		},
+		Args:   cmdArgs,
 	}
+
 	command := exec.Command(commandParams.Binary, commandParams.Args...)
 
 	if a.shouldStreamLocalProgress() {
@@ -1780,10 +1787,6 @@ func (p localCmdBackend) transcribe(a *app, job jobInput) (map[string]any, error
 	if a.config.Debug {
 		resultData["local_cmd"] = commandParams.Binary
 		resultData["local_cmd_args"] = commandParams.Args
-	}
-
-	if a.config.SystemPrompt != "" {
-		resultData["prompt_ignored"] = true
 	}
 
 	return resultData, nil
