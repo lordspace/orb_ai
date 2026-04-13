@@ -43,6 +43,7 @@ func TestNormalizeProvider(t *testing.T) {
 		"openai":         "openai",
 		"api":            "openai",
 		"oai":            "openai",
+		"groq":           "groq",
 		"something-else": "",
 	}
 
@@ -66,6 +67,8 @@ func TestResolveProvider(t *testing.T) {
 		{"", "test-key", "openai"},
 		{"local", "test-key", "local"},
 		{"openai", "", "openai"},
+		{"groq", "", "groq"},
+		{"groq", "test-key", "groq"},
 		{"bad-provider", "", ""},
 	}
 
@@ -134,8 +137,8 @@ func TestReadCliConfigIgnoresUnprefixedOpenAiEnv(t *testing.T) {
 		t.Fatalf("readCliConfig().Provider = %q", config.Provider)
 	}
 
-	if config.OpenAiApiKey != "" {
-		t.Fatalf("readCliConfig().OpenAiApiKey = %q", config.OpenAiApiKey)
+	if config.ApiKey != "" {
+		t.Fatalf("readCliConfig().ApiKey = %q", config.ApiKey)
 	}
 }
 
@@ -222,6 +225,11 @@ func TestResolveModel(t *testing.T) {
 		{"openai", "", "", "whisper-1"},
 		{"openai", "whisper1", "", "whisper-1"},
 		{"openai", "AAAAA", "", "whisper-1"},
+		{"groq", "", "", "whisper-large-v3-turbo"},
+		{"groq", "default", "", "whisper-large-v3-turbo"},
+		{"groq", "whisper-large-v3", "", "whisper-large-v3"},
+		{"groq", "distil-whisper-large-v3-en", "", "distil-whisper-large-v3-en"},
+		{"groq", "AAAAA", "", "whisper-large-v3-turbo"},
 	}
 
 	for _, testCase := range testCases {
@@ -347,5 +355,44 @@ func TestNewCliConfig(t *testing.T) {
 
 	if config.Workers < 1 {
 		t.Fatalf("newCliConfig().Workers = %d", config.Workers)
+	}
+}
+
+// TestIsRemoteProvider identifies providers that require API keys.
+func TestIsRemoteProvider(t *testing.T) {
+	testCases := map[string]bool{
+		"openai": true,
+		"groq":   true,
+		"local":  false,
+		"":       false,
+	}
+
+	for inputValue, expectedValue := range testCases {
+		actualValue := isRemoteProvider(inputValue)
+
+		if actualValue != expectedValue {
+			t.Fatalf("isRemoteProvider(%q) = %v, want %v", inputValue, actualValue, expectedValue)
+		}
+	}
+}
+
+// TestDefaultApiBaseUrl returns the default base URL for each provider.
+func TestDefaultApiBaseUrl(t *testing.T) {
+	groqUrl := defaultApiBaseUrl("groq")
+
+	if groqUrl != "https://api.groq.com/openai/v1" {
+		t.Fatalf("defaultApiBaseUrl(%q) = %q", "groq", groqUrl)
+	}
+
+	openaiUrl := defaultApiBaseUrl("openai")
+
+	if openaiUrl != "" {
+		t.Fatalf("defaultApiBaseUrl(%q) = %q, want empty", "openai", openaiUrl)
+	}
+
+	localUrl := defaultApiBaseUrl("local")
+
+	if localUrl != "" {
+		t.Fatalf("defaultApiBaseUrl(%q) = %q, want empty", "local", localUrl)
 	}
 }

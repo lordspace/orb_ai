@@ -11,7 +11,8 @@ type cliConfig struct {
 	OutputFormat string
 	Model        string
 	SystemPrompt string
-	OpenAiApiKey string
+	ApiKey       string
+	ApiBaseUrl   string
 	Workers      int
 	Progress     bool
 	Debug        bool
@@ -134,3 +135,12 @@ type localCmdBackend struct{}
 
 // localWhisperCppBackend runs local transcription through whisper-cli.
 type localWhisperCppBackend struct{}
+
+// groqProvider sends audio files to the Groq OpenAI-compatible transcription API.
+type groqProvider struct{}
+
+// preparedInput holds the audio file ready for whisper-cli plus an optional temp file to clean up.
+type preparedInput struct {
+	AudioFile string
+	TempFile  string
+}

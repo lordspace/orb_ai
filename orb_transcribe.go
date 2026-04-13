@@ -103,6 +103,16 @@ func newInputRefRequest(value string, itemType string) inputRefRequest {
 	return request
 }
 
+// isRemoteProvider returns true for providers that require an API key and call external APIs.
+func isRemoteProvider(provider string) bool {
+	switch provider {
+	case "openai", "groq":
+		return true
+	default:
+		return false
+	}
+}
+
 // validate fails fast on invalid top-level configuration before work starts.
 func (config cliConfig) validate() error {
 	if config.Files.InputFile == "" && config.Files.InputDir == "" {
@@ -121,8 +131,8 @@ func (config cliConfig) validate() error {
 		return fmt.Errorf("workers must be greater than zero")
 	}
 
-	if config.Provider == "openai" && config.OpenAiApiKey == "" {
-		return fmt.Errorf("api key required for openai provider")
+	if isRemoteProvider(config.Provider) && config.ApiKey == "" {
+		return fmt.Errorf("api key required for %s provider", config.Provider)
 	}
 
 	if config.Provider == "local" && config.OutputFormat != "txt" {
@@ -219,11 +229,12 @@ func parseArgs(args []string) (cliConfig, error) {
 	outputLong := flagSet.String("output-file", "", "Output transcript file")
 	targetLong := flagSet.String("target", "", "Output transcript file")
 	targetDirLong := flagSet.String("target-dir", "", "Target output directory")
-	providerShort := flagSet.String("p", "", "Provider (local, openai)")
-	providerLong := flagSet.String("provider", "", "Provider (local, openai)")
-	openAiApiKeyShort := flagSet.String("k", "", "OpenAI API key")
-	openAiApiKeyLong := flagSet.String("openai-api-key", "", "OpenAI API key")
-	apiKeyLong := flagSet.String("api-key", "", "OpenAI API key")
+	providerShort := flagSet.String("p", "", "Provider (local, openai, groq)")
+	providerLong := flagSet.String("provider", "", "Provider (local, openai, groq)")
+	apiKeyShort := flagSet.String("k", "", "API key for remote providers")
+	openAiApiKeyLong := flagSet.String("openai-api-key", "", "API key (backward compat alias)")
+	apiKeyLong := flagSet.String("api-key", "", "API key for remote providers")
+	apiBaseUrlLong := flagSet.String("api-base-url", "", "Override API base URL for OpenAI-compatible providers")
 	languageShort := flagSet.String("l", config.Language, "Language code")
 	languageLong := flagSet.String("language", "", "Language code")
 	langLong := flagSet.String("lang", "", "Language code")
@@ -328,14 +339,15 @@ func parseArgs(args []string) (cliConfig, error) {
 
 	modelValue := firstString(*modelLong)
 
-	openAiApiKey := firstString(*openAiApiKeyShort, *openAiApiKeyLong, *apiKeyLong)
+	apiKey := firstString(*apiKeyShort, *openAiApiKeyLong, *apiKeyLong)
 
 	if !hasExplicitOption(normalizedArgs, "-k", "--openai-api-key", "--api-key") {
-		openAiApiKey = firstString(
-			openAiApiKey,
+		apiKey = firstString(
+			apiKey,
 			getEnv(
 				"ORB_TRANSCRIBE_PROVIDER_OPENAI_API_KEY",
 				"ORB_TRANSCRIBE_OPENAI_API_KEY",
+				"ORB_TRANSCRIBE_API_KEY",
 			),
 		)
 	}
@@ -346,7 +358,7 @@ func parseArgs(args []string) (cliConfig, error) {
 		providerValue = firstString(providerValue, getEnv("ORB_TRANSCRIBE_PROVIDER"))
 	}
 
-	provider := resolveProvider(providerValue, openAiApiKey)
+	provider := resolveProvider(providerValue, apiKey)
 
 	if provider == "" {
 		return cliConfig{}, fmt.Errorf("unsupported provider: %s", providerValue)
@@ -356,6 +368,27 @@ func parseArgs(args []string) (cliConfig, error) {
 
 	if provider != "" {
 		providerEnvScope = "PROVIDER_" + strings.ToUpper(provider)
+	}
+
+	// Provider-scoped API key lookup (e.g. ORB_TRANSCRIBE_PROVIDER_GROQ_API_KEY)
+	if apiKey == "" && isRemoteProvider(provider) && providerEnvScope != "" {
+		apiKey = firstString(
+			lookupEnv(providerEnvScope, "API_KEY"),
+		)
+	}
+
+	apiBaseUrl := firstString(*apiBaseUrlLong)
+
+	if !hasExplicitOption(normalizedArgs, "--api-base-url") {
+		apiBaseUrl = firstString(
+			lookupEnv(providerEnvScope, "API_BASE_URL", "ORB_TRANSCRIBE_API_BASE_URL"),
+			apiBaseUrl,
+		)
+	}
+
+	// Apply provider-specific default base URL when none is explicitly set
+	if apiBaseUrl == "" {
+		apiBaseUrl = defaultApiBaseUrl(provider)
 	}
 
 	localBackendValue := firstString(*localBackendLong)
@@ -517,7 +550,8 @@ func parseArgs(args []string) (cliConfig, error) {
 	config.OutputFormat = outputFormat
 	config.Model = model
 	config.SystemPrompt = systemPrompt
-	config.OpenAiApiKey = openAiApiKey
+	config.ApiKey = apiKey
+	config.ApiBaseUrl = apiBaseUrl
 	config.Workers = workers
 	config.Progress = progress
 	config.Debug = debug
@@ -895,6 +929,8 @@ func normalizeProvider(value string) string {
 		return "local"
 	case "openai", "api", "oai":
 		return "openai"
+	case "groq":
+		return "groq"
 	default:
 		return ""
 	}
@@ -981,6 +1017,19 @@ func resolveModel(request modelResolveRequest) string {
 			return "gpt-4o-mini-transcribe"
 		default:
 			return "whisper-1"
+		}
+	}
+
+	if request.Provider == "groq" {
+		switch modelValue {
+		case "", "default", "whisper-large-v3-turbo":
+			return "whisper-large-v3-turbo"
+		case "whisper-large-v3":
+			return "whisper-large-v3"
+		case "distil-whisper-large-v3-en":
+			return "distil-whisper-large-v3-en"
+		default:
+			return "whisper-large-v3-turbo"
 		}
 	}
 
@@ -1240,11 +1289,24 @@ func (a *app) run() (map[string]any, error) {
 	return a.buildResultData(results), processErr
 }
 
+// defaultApiBaseUrl returns the default API base URL for OpenAI-compatible providers.
+// An empty string means use the SDK default (api.openai.com).
+func defaultApiBaseUrl(provider string) string {
+	switch provider {
+	case "groq":
+		return "https://api.groq.com/openai/v1"
+	default:
+		return ""
+	}
+}
+
 // prepareProvider selects the provider and resolves its runtime dependencies.
 func (a *app) prepareProvider() error {
 	switch a.config.Provider {
 	case "openai":
 		a.provider = openAiProvider{}
+	case "groq":
+		a.provider = groqProvider{}
 	case "local":
 		a.provider = localProvider{}
 	default:
@@ -1510,13 +1572,9 @@ func (a *app) processJob(job jobInput) (map[string]any, error) {
 	return resultData, nil
 }
 
-// prepare resolves runtime dependencies for the OpenAI provider.
-func (p openAiProvider) prepare(a *app) error {
-	return nil
-}
-
-// transcribe sends one audio file to OpenAI and writes the response.
-func (p openAiProvider) transcribe(a *app, job jobInput) (map[string]any, error) {
+// transcribeOpenAiCompat sends one audio file to an OpenAI-compatible transcription endpoint.
+// Both openAiProvider and groqProvider reuse this — only the base URL differs.
+func transcribeOpenAiCompat(a *app, job jobInput) (map[string]any, error) {
 	fileHandle, openErr := os.Open(job.Files.InputFile)
 
 	if openErr != nil {
@@ -1525,7 +1583,16 @@ func (p openAiProvider) transcribe(a *app, job jobInput) (map[string]any, error)
 
 	defer fileHandle.Close()
 
-	client := openai.NewClient(option.WithAPIKey(a.config.OpenAiApiKey))
+	clientOpts := []option.RequestOption{
+		option.WithAPIKey(a.config.ApiKey),
+	}
+
+	if a.config.ApiBaseUrl != "" {
+		clientOpts = append(clientOpts, option.WithBaseURL(a.config.ApiBaseUrl))
+	}
+
+	client := openai.NewClient(clientOpts...)
+
 	requestParams := openai.AudioTranscriptionNewParams{
 		File:           fileHandle,
 		Model:          openai.AudioModel(a.config.Model),
@@ -1556,7 +1623,8 @@ func (p openAiProvider) transcribe(a *app, job jobInput) (map[string]any, error)
 	)
 
 	if requestErr != nil {
-		return nil, fmt.Errorf("openai request failed: %w", requestErr)
+		providerLabel := a.config.Provider
+		return nil, fmt.Errorf("%s request failed: %w", providerLabel, requestErr)
 	}
 
 	writeErr := os.WriteFile(job.Files.OutputFile, responseBody, 0644)
@@ -1570,11 +1638,37 @@ func (p openAiProvider) transcribe(a *app, job jobInput) (map[string]any, error)
 	resultData := a.newSuccessResult(job, transcriptText, len(responseBody))
 
 	if a.config.Debug && httpResponse != nil {
-		resultData["api_url"] = "https://api.openai.com/v1/audio/transcriptions"
+		apiUrl := "https://api.openai.com/v1/audio/transcriptions"
+
+		if a.config.ApiBaseUrl != "" {
+			apiUrl = a.config.ApiBaseUrl + "/audio/transcriptions"
+		}
+
+		resultData["api_url"] = apiUrl
 		resultData["http_status"] = httpResponse.StatusCode
 	}
 
 	return resultData, nil
+}
+
+// prepare resolves runtime dependencies for the OpenAI provider.
+func (p openAiProvider) prepare(a *app) error {
+	return nil
+}
+
+// transcribe sends one audio file to OpenAI and writes the response.
+func (p openAiProvider) transcribe(a *app, job jobInput) (map[string]any, error) {
+	return transcribeOpenAiCompat(a, job)
+}
+
+// prepare resolves runtime dependencies for the Groq provider.
+func (p groqProvider) prepare(a *app) error {
+	return nil
+}
+
+// transcribe sends one audio file to the Groq API and writes the response.
+func (p groqProvider) transcribe(a *app, job jobInput) (map[string]any, error) {
+	return transcribeOpenAiCompat(a, job)
 }
 
 // prepare selects the local backend and resolves its runtime dependencies.
@@ -1716,15 +1810,24 @@ func (p localWhisperCppBackend) prepare(a *app) error {
 	return nil
 }
 
-// transcribe converts input audio to wav, runs whisper-cli, and writes the final txt output.
+// transcribe runs whisper-cli on the input audio and writes the final txt output.
 func (p localWhisperCppBackend) transcribe(a *app, job jobInput) (map[string]any, error) {
-	run, runErr := a.newWhisperRun(job)
+	// Step 1: Convert input to a whisper-native format if needed.
+	preparedInput, prepareErr := a.prepareWhisperInput(job)
 
-	if runErr != nil {
-		return nil, runErr
+	if prepareErr != nil {
+		return nil, prepareErr
 	}
 
-	runErr = a.runWhisperCommand(run)
+	// Step 2: Build the whisper-cli command.
+	run, buildErr := a.newWhisperRun(preparedInput, job)
+
+	if buildErr != nil {
+		return nil, buildErr
+	}
+
+	// Step 3: Execute whisper-cli.
+	runErr := a.runWhisperCommand(run)
 
 	if runErr != nil {
 		cleanupErr := a.cleanupWhisperRun(run, runErr)
@@ -1732,6 +1835,7 @@ func (p localWhisperCppBackend) transcribe(a *app, job jobInput) (map[string]any
 		return nil, cleanupErr
 	}
 
+	// Step 4: Read the transcript output.
 	transcriptOutput, outputErr := a.finalizeWhisperOutput(run.OutputRef)
 
 	if outputErr != nil {
@@ -1740,6 +1844,7 @@ func (p localWhisperCppBackend) transcribe(a *app, job jobInput) (map[string]any
 		return nil, cleanupErr
 	}
 
+	// Step 5: Cleanup temp files.
 	cleanupErr := a.cleanupWhisperRun(run, nil)
 
 	if cleanupErr != nil {
@@ -1751,22 +1856,56 @@ func (p localWhisperCppBackend) transcribe(a *app, job jobInput) (map[string]any
 	return resultData, nil
 }
 
-// newWhisperRun prepares the temp wav file, output refs, and command args for one whisper run.
-func (a *app) newWhisperRun(job jobInput) (whisperRun, error) {
-	waveFile, decodeErr := a.decodeWhisperWaveFile(job)
+// whisperNativeFormats lists extensions that whisper-cli reads directly (no ffmpeg needed).
+var whisperNativeFormats = map[string]bool{
+	".flac": true,
+	".mp3":  true,
+	".ogg":  true,
+	".wav":  true,
+}
 
-	if decodeErr != nil {
-		return whisperRun{}, decodeErr
+// prepareWhisperInput returns an audio file that whisper-cli can read directly.
+// Native formats (flac, mp3, ogg, wav) pass through unchanged.
+// Other formats (m4a, aac, wma, etc.) are converted to ogg via ffmpeg.
+func (a *app) prepareWhisperInput(job jobInput) (preparedInput, error) {
+	inputExt := strings.ToLower(filepath.Ext(job.Files.InputFile))
+	isNative := whisperNativeFormats[inputExt]
+
+	if isNative {
+		result := preparedInput{
+			AudioFile: job.Files.InputFile,
+			TempFile:  "",
+		}
+
+		return result, nil
 	}
 
+	decodedFile, decodeErr := a.decodeWhisperAudioFile(job)
+
+	if decodeErr != nil {
+		return preparedInput{}, decodeErr
+	}
+
+	result := preparedInput{
+		AudioFile: decodedFile,
+		TempFile:  decodedFile,
+	}
+
+	return result, nil
+}
+
+// newWhisperRun builds the whisper-cli command from a prepared input.
+func (a *app) newWhisperRun(input preparedInput, job jobInput) (whisperRun, error) {
 	outputRef := newWhisperOutputRef(job.Files.OutputFile)
-	whisperArgs := a.buildWhisperArgs(waveFile, outputRef)
+	whisperArgs := a.buildWhisperArgs(input.AudioFile, outputRef)
+
 	commandParams := cmdParams{
 		Binary: a.config.Backend.Binary,
 		Args:   whisperArgs,
 	}
+
 	run := whisperRun{
-		WaveFile:  waveFile,
+		WaveFile:  input.TempFile,
 		OutputRef: outputRef,
 		Cmd:       commandParams,
 	}
@@ -1830,8 +1969,12 @@ func (a *app) runWhisperCommand(run whisperRun) error {
 	return nil
 }
 
-// cleanupWhisperRun removes the temp wav file and preserves the main run error when needed.
+// cleanupWhisperRun removes the temp decoded file (if any) and preserves the main run error.
 func (a *app) cleanupWhisperRun(run whisperRun, mainErr error) error {
+	if run.WaveFile == "" {
+		return mainErr
+	}
+
 	removeErr := os.Remove(run.WaveFile)
 
 	if removeErr != nil && !os.IsNotExist(removeErr) {
@@ -1859,12 +2002,14 @@ func (a *app) newWhisperResult(job jobInput, run whisperRun, transcriptOutput tr
 	return resultData
 }
 
-// decodeWhisperWaveFile converts one input file into a temp mono 16 kHz wav file.
-func (a *app) decodeWhisperWaveFile(job jobInput) (string, error) {
-	tempFile, createErr := os.CreateTemp("", "orb_transcribe_*.wav")
+// decodeWhisperAudioFile converts one input file into a temp mono 16 kHz ogg file.
+// Ogg is used instead of wav because whisper-cli reads it natively and it is
+// much smaller than uncompressed wav — important for large audio files.
+func (a *app) decodeWhisperAudioFile(job jobInput) (string, error) {
+	tempFile, createErr := os.CreateTemp("", "orb_transcribe_*.ogg")
 
 	if createErr != nil {
-		return "", fmt.Errorf("failed to create temp wav file")
+		return "", fmt.Errorf("failed to create temp audio file")
 	}
 
 	tempFileName := tempFile.Name()
@@ -1872,7 +2017,7 @@ func (a *app) decodeWhisperWaveFile(job jobInput) (string, error) {
 	var jobErr error
 
 	if closeErr != nil {
-		jobErr = fmt.Errorf("failed to prepare temp wav file")
+		jobErr = fmt.Errorf("failed to prepare temp audio file")
 	}
 
 	if jobErr == nil {
@@ -1883,7 +2028,8 @@ func (a *app) decodeWhisperWaveFile(job jobInput) (string, error) {
 			"-i", job.Files.InputFile,
 			"-ar", "16000",
 			"-ac", "1",
-			"-c:a", "pcm_s16le",
+			"-c:a", "libvorbis",
+			"-q:a", "4",
 			tempFileName,
 		}
 		decodeCommand := exec.Command(a.config.Backend.DecodeBinary, decodeArgs...)
