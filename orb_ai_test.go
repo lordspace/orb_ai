@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -227,7 +228,9 @@ func TestNormalizeOutputFormat(t *testing.T) {
 	}
 }
 
-// TestResolveModel keeps unknown values on provider defaults.
+// TestResolveModel pins that a local model asked for by name is kept as asked (only aliases
+// change), so a missing one fails later instead of running another; remote providers keep
+// their defaults.
 func TestResolveModel(t *testing.T) {
 	testCases := []struct {
 		Provider      string
@@ -236,8 +239,10 @@ func TestResolveModel(t *testing.T) {
 		ExpectedValue string
 	}{
 		{"local", "", "", "large-v3"},
-		{"local", "medium", "", "large-v3"},
-		{"local", "AAAAA", "", "large-v3"},
+		{"local", "medium", "", "medium"},
+		{"local", "AAAAA", "", "aaaaa"},
+		{"local", "large-v3-turbo", "", "turbo"},
+		{"local", "large_v3_turbo", "", "turbo"},
 		{"local", "large_v3", "", "large-v3"},
 		{"local", "large-v3", "", "large-v3"},
 		{"local", "", "/tmp/ggml-large-v3.bin", "large-v3"},
@@ -263,6 +268,62 @@ func TestResolveModel(t *testing.T) {
 		if actualValue != testCase.ExpectedValue {
 			t.Fatalf("resolveModel(%q, %q, %q) = %q, want %q", testCase.Provider, testCase.ModelValue, testCase.ModelFile, actualValue, testCase.ExpectedValue)
 		}
+	}
+}
+
+// TestResolveWhisperModelFile pins that an installed model is found, and that a model which is
+// not installed or not known fails with the installed models in the message.
+func TestResolveWhisperModelFile(t *testing.T) {
+	modelDir := t.TempDir()
+	installedFile := filepath.Join(modelDir, "ggml-large-v3.bin")
+	writeErr := os.WriteFile(installedFile, []byte("model"), 0600)
+
+	if writeErr != nil {
+		t.Fatalf("os.WriteFile() error = %v", writeErr)
+	}
+
+	expectedFile, expectedErr := filepath.EvalSymlinks(installedFile)
+
+	if expectedErr != nil {
+		t.Fatalf("filepath.EvalSymlinks() error = %v", expectedErr)
+	}
+
+	installedApp := &app{config: cliConfig{Model: "large-v3", Backend: backendConfig{ModelDir: modelDir}}}
+	modelFile, modelErr := installedApp.resolveWhisperModelFile()
+
+	if modelErr != nil {
+		t.Fatalf("resolveWhisperModelFile(large-v3) error = %v", modelErr)
+	}
+
+	if modelFile != expectedFile {
+		t.Fatalf("resolveWhisperModelFile(large-v3) = %q, want %q", modelFile, expectedFile)
+	}
+
+	missingApp := &app{config: cliConfig{Model: "tiny", Backend: backendConfig{ModelDir: modelDir}}}
+	_, missingErr := missingApp.resolveWhisperModelFile()
+
+	if missingErr == nil {
+		t.Fatalf("resolveWhisperModelFile(tiny) found a model that is not installed")
+	}
+
+	missingMsg := missingErr.Error()
+
+	if !strings.Contains(missingMsg, "ggml-tiny.bin") || !strings.Contains(missingMsg, "(installed: large-v3)") {
+		t.Fatalf("resolveWhisperModelFile(tiny) error = %q", missingMsg)
+	}
+
+	unknownApp := &app{config: cliConfig{Model: "no_such_model", Backend: backendConfig{ModelDir: modelDir}}}
+	_, unknownErr := unknownApp.resolveWhisperModelFile()
+
+	if unknownErr == nil {
+		t.Fatalf("resolveWhisperModelFile(no_such_model) found a model")
+	}
+
+	unknownMsg := unknownErr.Error()
+	expectedMsg := "unsupported local model: no_such_model (installed: large-v3)"
+
+	if unknownMsg != expectedMsg {
+		t.Fatalf("resolveWhisperModelFile(no_such_model) error = %q, want %q", unknownMsg, expectedMsg)
 	}
 }
 

@@ -1100,7 +1100,10 @@ func normalizeOutputFormat(value string) string {
 	}
 }
 
-// resolveModel normalizes known model aliases and falls back to sane defaults.
+// resolveModel normalizes known model aliases. A local model asked for by name comes back as
+// asked, so one that is not installed fails instead of quietly running another; no name gives
+// the default, and a model file decides when one is set. Remote providers fall back to their
+// defaults.
 func resolveModel(request modelResolveRequest) string {
 	modelValue := normalizeDashedValue(request.Value)
 
@@ -1133,12 +1136,14 @@ func resolveModel(request modelResolveRequest) string {
 	modelFromFile := whisperModelFromFile(request.ModelFile)
 
 	switch modelValue {
-	case "", "default", "medium":
+	case "", "default":
 		if modelFromFile != "" {
 			return modelFromFile
 		}
 
 		return "large-v3"
+	case "medium":
+		return "medium"
 	case "tiny":
 		return "tiny"
 	case "base":
@@ -1151,14 +1156,14 @@ func resolveModel(request modelResolveRequest) string {
 		return "large-v2"
 	case "largev3", "large-v3":
 		return "large-v3"
-	case "turbo":
+	case "turbo", "large-v3-turbo":
 		return "turbo"
 	default:
 		if modelFromFile != "" {
 			return modelFromFile
 		}
 
-		return "large-v3"
+		return modelValue
 	}
 }
 
@@ -1225,9 +1230,10 @@ func (a *app) resolveWhisperModelFile() (string, error) {
 	}
 
 	modelFileName := whisperModelFileName(a.config.Model)
+	var modelErr error
 
 	if modelFileName == "" {
-		return "", fmt.Errorf("unsupported local model: %s", a.config.Model)
+		modelErr = fmt.Errorf("unsupported local model: %s", a.config.Model)
 	}
 
 	if a.config.Backend.ModelDir != "" {
@@ -1238,14 +1244,53 @@ func (a *app) resolveWhisperModelFile() (string, error) {
 			return "", resolveErr
 		}
 
-		modelFile := filepath.Join(modelDirInfo.ResolvedFile, modelFileName)
-		modelInfo, resolveErr := resolveInputRef(newInputRefRequest(modelFile, "file"))
+		if modelErr == nil {
+			modelFile := filepath.Join(modelDirInfo.ResolvedFile, modelFileName)
+			modelRequest := newInputRefRequest(modelFile, "file")
+			modelInfo, fileErr := resolveInputRef(modelRequest)
 
-		if resolveErr != nil {
-			return "", resolveErr
+			if fileErr == nil {
+				return modelInfo.ResolvedFile, nil
+			}
+
+			modelErr = fileErr
 		}
 
-		return modelInfo.ResolvedFile, nil
+		// The error lists the installed models so the caller sees what it can ask for. The list
+		// only adds to the message: a dir that cannot be read leaves the error as it is.
+		dirEntries, readErr := os.ReadDir(modelDirInfo.ResolvedFile)
+
+		if readErr != nil {
+			return "", modelErr
+		}
+
+		installedModels := []string{}
+
+		for _, dirEntry := range dirEntries {
+			entryName := dirEntry.Name()
+			installedModel := whisperModelFromFile(entryName)
+
+			if installedModel == "" {
+				continue
+			}
+
+			installedModels = append(installedModels, installedModel)
+		}
+
+		installedList := strings.Join(installedModels, ", ")
+
+		if installedList == "" {
+			installedList = "none"
+		}
+
+		// e.g. "unsupported local model: nope (installed: turbo, large-v3)"
+		listedErr := fmt.Errorf("%w (installed: %s)", modelErr, installedList)
+
+		return "", listedErr
+	}
+
+	if modelErr != nil {
+		return "", modelErr
 	}
 
 	workingDir, workingErr := os.Getwd()
