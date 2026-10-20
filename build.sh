@@ -11,6 +11,7 @@ APP_ORB_OPT_FILES_DIR="${ORB_AI_ORB_OPT_FILES_DIR:-}"
 
 if [ -z "$APP_ORB_OPT_FILES_DIR" ]; then
     APP_ORB_OPT_SEARCH_DIRS=(
+        "$HOME/projects/tools/orb_opt/docker/orb_opt/image_debian/files"
         "$HOME/Documents/projects/web/orb_opt/docker/orb_opt/image_debian/files"
         "$HOME/projects/web/orb_opt/docker/orb_opt/image_debian/files"
         "$HOME/orb_opt/docker/orb_opt/image_debian/files"
@@ -83,11 +84,13 @@ if [ -z "$APP_ORB_OPT_FILES_DIR" ]; then
     exit 0
 fi
 
-if [ ! -d "$APP_ORB_OPT_FILES_DIR" ]; then
-    mkdir -p "$APP_ORB_OPT_FILES_DIR"
+APP_IMAGE_BIN_DIR="$APP_ORB_OPT_FILES_DIR/bin"
+
+if [ ! -d "$APP_IMAGE_BIN_DIR" ]; then
+    mkdir -p "$APP_IMAGE_BIN_DIR"
 fi
 
-APP_IMAGE_BINARY="$APP_ORB_OPT_FILES_DIR/orb_ai"
+APP_IMAGE_BINARY="$APP_IMAGE_BIN_DIR/orb_ai"
 
 if [ -f "$APP_LINUX_BINARY" ]; then
     cp "$APP_LINUX_BINARY" "$APP_IMAGE_BINARY"

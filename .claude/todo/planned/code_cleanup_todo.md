@@ -2,10 +2,10 @@
 
 Goal: the code, the docs and the build script match the project as it is now.
 
-- [P600] `build.sh` looks for orb_opt's image files dir only under `~/Documents/projects/web/orb_opt`,
-  `~/projects/web/orb_opt` and `~/orb_opt` (`build.sh:14–16`), so on a machine with orb_opt
-  elsewhere the Linux binary is built but not copied unless `ORB_AI_ORB_OPT_FILES_DIR` is set.
-  Read 2026-10-19.
+- [x] [P600] `build.sh` looked for orb_opt's image files dir only under `~/Documents/projects/web/orb_opt`,
+  `~/projects/web/orb_opt` and `~/orb_opt`, so on a machine with orb_opt elsewhere the Linux binary
+  was built but not copied unless `ORB_AI_ORB_OPT_FILES_DIR` was set. Read 2026-10-19. Fixed
+  2026-10-19: `~/projects/tools/orb_opt` is searched first, and the binary goes to `files/bin/orb_ai`.
 - [P600] `zzz_project/docs/readme.txt` calls the tool `orb_transcribe` throughout, with
   `ORB_TRANSCRIBE_*` settings and `orb_transcribe` binaries; the code reads `ORB_AI_*` and the build
   makes `orb_ai`. Read 2026-10-19.
